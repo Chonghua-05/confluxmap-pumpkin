@@ -2,7 +2,9 @@
 
 来源：`confluxmap/common/src/main/java/cn/net/rms/confluxmap/core/net/`
 的 `Proto.java` / `MsgCodec.java` / `HelloC2S.java` / `HelloPolicyS2C.java`。
-本插件只实现其中两条消息，其余消息码仅作保留说明。
+本插件实现 `HELLO` → `HELLO_POLICY` 这条握手，并在客户端声明能力报价时于策略帧之前
+插入 `0x12 MAP_CAPABILITIES` 与 `0x13 SERVER_INSTANCE` 两帧；其余消息码仅作保留说明。
+对应插件版本 v0.1.1。
 
 ## 通则
 
@@ -39,6 +41,12 @@ mod 的玩家"的天然门控。
 
 `predictorVersion` 只用于参考服务端判断能否做残差纠错；**只发种子的服务端可以
 忽略，但应当记录** —— 客户端预测地图与实际地形不符时，它是第一个要核对的东西。
+
+自协议主版本 4 起，`predictorVersion` 尾部可带一个能力报价：以 `|caps2:` 引入的
+base64url 数据块（信封版本 2，含全部 8 个能力）。插件只从中判断客户端是否提供
+`SERVER_INSTANCE`（能力 id 7，版本 1），其余能力一律不授予——它们都属于纠错流。
+未带该标记的旧客户端按上一版处理，只收到 `0x02 HELLO_POLICY`。帧序见
+「握手帧序与能力协商」。
 
 ## `0x02` S2C `HELLO_POLICY`
 
@@ -95,13 +103,14 @@ mod 的玩家"的天然门控。
 
 `correctionsEnabled = 0` → 客户端进入 `ClientMode.SERVER_DISABLED`：
 会话保持 **ACTIVE**、种子可用、客户端自己用种子生成预测地图，但**从不**请求
-权威补丁。这正是本插件的最小形态，且客户端原生支持，无需改客户端。
+权威补丁。这正是本插件的形态，且客户端原生支持，无需改客户端。
 
 这条路在客户端代码里是可逐行验证的，不依赖"大概能用"：
 
 1. `CompanionSession.onPolicy` 先调 `MapSyncProtocol.acceptServer(pendingSelection, policy, ...)`。
    `pendingSelection` 只在服务端发过 `MapSyncCompatibilityS2C` / `MapCapabilitiesS2C` 时才非空；
-   本插件两个都不发，所以走到 `acceptServer` 最后一段兜底返回：
+   未带 caps2 报价的客户端两者都收不到，`pendingSelection` 为空，于是走到 `acceptServer`
+   最后一段兜底返回：
    ```java
    !policy.flags().correctionsEnabled()
        ? NegotiatedMapSync.CorrectionMode.DISABLED
@@ -112,7 +121,13 @@ mod 的玩家"的天然门控。
    → `true && true` → 返回 `ClientMode.SERVER_DISABLED`（不是 `INCOMPATIBLE`）。
 3. `onPolicy` 随后 `state.set(State.ACTIVE)`，`policy` 原样保留（不会走 `withoutCorrections`）。
 
-所以 **HELLO → HELLO_POLICY 一轮即完成握手**，中间没有任何额外的协商往返。客户端日志会打：
+声明了 caps2 的客户端先收到 `0x12`，其选择帧自身的 `correctionMode` 就是 `DISABLED`
+（reason `NO_COMMON_WIRE`）。两条路径的结论一致：客户端都停在 `SERVER_DISABLED`，
+不会进入任何纠错流程。
+
+所以握手是**一轮**：旧客户端收一帧 `HELLO_POLICY`；带 caps2 报价的客户端在策略帧
+之前先收 `0x12`（必要时还有 `0x13`）。额外的帧是服务端到客户端的单向前置声明，
+不产生往返，因此不存在"协商多打一轮"的问题。客户端日志会打：
 
 ```
 companion active (worldId=... worldgen=26.2 seedGranted=true corrections=false
@@ -207,14 +222,100 @@ shareCorrections=false` 代入，得到：
 | `0x0F` | S2C | `MAP_REGION_INVALIDATE` | 不发送 |
 | `0x10` | S2C | `MAP_COMPATIBILITY` | 不发送 |
 | `0x11` | S2C | `SERVER_VIEW_DISTANCE` | 不发送 |
-| `0x12` | S2C | `MAP_CAPABILITIES` | 不发送 |
-| `0x13` | S2C | `SERVER_INSTANCE` | 不发送 |
+| `0x12` | S2C | `MAP_CAPABILITIES` | 对带 caps2 报价的客户端发送；能力列表为空或仅 `SERVER_INSTANCE` |
+| `0x13` | S2C | `SERVER_INSTANCE` | 仅在 `0x12` 授予了 `SERVER_INSTANCE` 时发送，携带本实例 UUID 的规范字符串 |
 | `0x14` | S2C | `PLAYER_POSITIONS` | 不发送 |
 
 「忽略」表示该码到达同一通道但并非 `HELLO`：插件记录一条日志后不作处理。各 S2C 帧
-之所以一律不发，是因为策略里对应的开关与能力位全部为 0（如 `correctionsEnabled = 0`），
-客户端不会进入相关流程。哪些帧将来能发、哪些根本发不了，见
+之所以其余 S2C 帧一律不发，是因为策略里对应的开关与能力位全部为 0（如
+`correctionsEnabled = 0`），客户端不会进入相关流程。哪些帧将来能发、哪些根本发不了，见
 [pumpkin-capabilities.md](pumpkin-capabilities.md)。
 
-共享航点在另一个通道 `confluxmap:waypoints_v1` 上（`SharedWaypointProto`，v1.3，
-消息码 `0x01`–`0x0B`）。本插件不实现也不发送该通道的任何消息。
+## 握手帧序与能力协商
+
+带 caps2 报价的客户端，一次 HELLO 的回复帧序为：
+
+1. `0x12 MAP_CAPABILITIES`（能力选择帧）
+2. `0x13 SERVER_INSTANCE`（仅当授予了 `SERVER_INSTANCE`）
+3. `0x02 HELLO_POLICY`（总是最后一帧）
+
+**顺序不可换。** `SERVER_INSTANCE` 是能力门控消息：客户端从 `0x12` 解析出被选中的
+能力，未在 `0x12` 中选中的能力，`0x13` 会被直接拒绝（`NegotiatedMapSync.requireCapability`）。
+`HELLO_POLICY` 必须最后发，因为客户端在策略帧上打开会话。
+
+未带 caps2 标记的旧客户端只收到 `0x02`，与上一版完全一致；插件不会因升级而改变
+它们的行为。
+
+### 能力报价的解析
+
+`predictorVersion` 尾部的 `|caps2:<base64url>` 数据块（信封版本 2）经 base64url 解码后
+包含客户端提供的全部 8 个能力。插件**只授予 `SERVER_INSTANCE`（能力 id 7，版本 1）**：
+其余能力都属于纠错流，本插件不实现，授予会让客户端等待永不到达的消息。因此能力列表
+要么为空，要么只有一项。
+
+### `0x12 MAP_CAPABILITIES` 帧格式
+
+| # | 类型 | 字段 | 本插件取值 |
+|---|---|---|---|
+| 0 | `u8` | `type` | `0x12` |
+| 1 | `u8` | negotiation version | `2` |
+| 2 | `utf` | 服务端 mod 版本 | 插件自身版本号 |
+| 3 | `utf` | 基线预测器标识 | 空串（本插件不声明基线） |
+| 4 | `u8` | `correctionMode` | `2` = `DISABLED` |
+| 5 | `u8` | `reason` | `2` = `NO_COMMON_WIRE` |
+| 6 | `u8` | `correctionProfile` | `2` = `SOURCE_LIGHT_V2`（仅取形状，纠错关闭时不解码纠错体） |
+| 7 | `u8` | 能力数 | `0` 或 `1` |
+| 8+ | ×N | 能力项 | `u8` id + `u8` version，本插件只有 `7` / `1` |
+
+### `0x13 SERVER_INSTANCE` 帧格式
+
+| # | 类型 | 字段 | 本插件取值 |
+|---|---|---|---|
+| 0 | `u8` | `type` | `0x13` |
+| 1 | `utf` | `instanceId` | 本实例的 UUID 规范字符串 |
+
+实例 id 首次使用时生成并持久化于 `plugins/data/confluxmap-pumpkin/server_instance.json`
+（`{"uuid": "..."}`，与上游 `UuidFileStore` 同形）；文件不可读时重新生成并告警。它与
+`worldId` 是两件事：`worldId` 存在世界存档里，会随被复制的世界一起走；实例 id 存在
+插件配置旁，不会。Velocity 等代理后面多个子世界共用同一个 `worldId` 时，客户端靠实例
+id 区分存储命名空间，避免地图数据互相覆盖。
+
+## 公共路径点通道（`confluxmap:waypoints_v1`）
+
+共享航点走独立通道 `confluxmap:waypoints_v1`，协议 1.3（上游 `SharedWaypointProto`）。
+
+| 码 | 方向 | 消息 | 本插件 |
+|---|---|---|---|
+| `0x01` | C2S | `HELLO` | 处理：以 `0x02 STATUS` 应答 |
+| `0x02` | S2C | `STATUS` | 发送 |
+| `0x03` | C2S | `SUBSCRIBE` | 处理：回一条 `0x07 SNAPSHOT` |
+| `0x04` | C2S | `CREATE` | 处理 |
+| `0x05` | C2S | `DELETE` | 处理 |
+| `0x06` | C2S | `LOCK` | 一律回 `RESULT` / `INVALID_REQUEST` |
+| `0x07` | S2C | `SNAPSHOT` | 发送 |
+| `0x08` | S2C | `UPSERT` | 发送（增量广播） |
+| `0x09` | S2C | `REMOVE` | 发送（增量广播） |
+| `0x0A` | S2C | `RESULT` | 发送 |
+| `0x0B` | C2S | `UPDATE` | 处理 |
+
+语义照上游：全局 revision 单调递增、每次变更 +1；`expectedRevision` 乐观并发；
+`operationId` 幂等，重连重试不会重复发布；配额、权限与限流（控制请求 8 突发 /
+每分钟 60；变更 10 突发、每分钟数由 `waypoint_mutations_per_minute` 配置）；畸形包
+累计 3 次后静音到断线。`LOCK` 一律返回 `INVALID_REQUEST`——服务端标记已随上游移除，
+该消息码只为兼容而保留。
+
+权限：op 等级 ≥ 2 视为管理员；`allow_non_operator_waypoint_management`（默认 `true`）
+允许非 op 管理自己发布的点。
+
+持久化在 `plugins/data/confluxmap-pumpkin/shared_waypoints.json`，schema 2，文档形状与
+上游一致（`schemaVersion` / `revision` / `ownerInstanceId` / `waypoints[]`），只有位置
+不同——WASI 沙箱只开放插件私有数据目录，插件读不到世界存档目录。损坏的文档隔离为
+`.bad` 后重建；schema 更高的文档保留不动且功能置为不可用；带着别的服务端
+`ownerInstanceId` 的文档改名为 `.bak`。
+
+与上游的第二处差异：高度校验用的是客户端同一套坐标边界（|coord| ≤ 3000 万、
+水平 ≤ 29999984），而不是按维度取世界高度上下限——Pumpkin 没有把世界高度暴露给
+插件的接口。
+
+网页地图不在本插件范围内：上游瓦片来自读存档的纠错服务，此处没有权威地图可供给，
+退化为浏览器端按种子预测只是重复客户端已有的本地预测，因此不做。

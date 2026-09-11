@@ -67,6 +67,27 @@ pub const TEMPLATE: &str = "\
 # Dimensions to advertise, comma separated, e.g.
 # \"minecraft:overworld,minecraft:the_nether\". Default: minecraft:overworld.
 # dims = \"minecraft:overworld\"
+
+# Whether the shared-waypoint channel is served. Set to false to answer that
+# channel's handshake with enabled=false and refuse every mutation. Default: true.
+# share_waypoints = true
+
+# Whether a non-operator may create, edit, or delete their own waypoints. Set to
+# false to reserve management for operators while everyone still views.
+# Default: true.
+# allow_non_operator_waypoint_management = true
+
+# Most waypoints kept per world, over all players. Values outside 1-512 are
+# clamped. Default: 512.
+# max_waypoints_per_world = 512
+
+# Most waypoints one player may publish, further capped by the per-world limit.
+# Values outside 1-64 are clamped. Default: 64.
+# max_waypoints_per_player = 64
+
+# Waypoint changes one player may make per minute; excess is throttled. Values
+# outside 1-6000 are clamped. Default: 30.
+# waypoint_mutations_per_minute = 30
 ";
 
 /// Minecraft version baked into the `pumpkin-plugin-api` build this plugin was
@@ -107,6 +128,16 @@ pub struct Config {
     pub dims: Vec<DimSpec>,
     /// Advertised rate/batch limits.
     pub budgets: Budgets,
+    /// Whether the shared-waypoint channel is served at all (`share_waypoints`).
+    pub share_waypoints: bool,
+    /// Whether a non-operator may manage the waypoints they published.
+    pub allow_non_operator_waypoint_management: bool,
+    /// Ceiling on waypoints retained per world.
+    pub max_waypoints_per_world: u32,
+    /// Ceiling on waypoints a single player may publish.
+    pub max_waypoints_per_player: u32,
+    /// Waypoint mutations a single player may make per minute.
+    pub waypoint_mutations_per_minute: u32,
 }
 
 impl Default for Config {
@@ -118,6 +149,11 @@ impl Default for Config {
             world_id_override: None,
             dims: default_dims(),
             budgets: Budgets::default(),
+            share_waypoints: true,
+            allow_non_operator_waypoint_management: true,
+            max_waypoints_per_world: 512,
+            max_waypoints_per_player: 64,
+            waypoint_mutations_per_minute: 30,
         }
     }
 }
@@ -277,6 +313,27 @@ impl Config {
             .map(|d| format!("{} ({}, predictable={})", d.id, d.kind, d.predictable))
             .collect();
         let _ = writeln!(out, "dims           = {}", dims.join(", "));
+        let _ = writeln!(out, "share_waypoints = {}", self.share_waypoints);
+        let _ = writeln!(
+            out,
+            "allow_non_operator_waypoint_management = {}",
+            self.allow_non_operator_waypoint_management
+        );
+        let _ = writeln!(
+            out,
+            "max_waypoints_per_world = {}",
+            self.max_waypoints_per_world
+        );
+        let _ = writeln!(
+            out,
+            "max_waypoints_per_player = {}",
+            self.max_waypoints_per_player
+        );
+        let _ = writeln!(
+            out,
+            "waypoint_mutations_per_minute = {}",
+            self.waypoint_mutations_per_minute
+        );
         out
     }
 
@@ -288,6 +345,20 @@ impl Config {
         } else {
             "compile-time fallback"
         }
+    }
+
+    /// Clamps the waypoint limits into the ranges the server actually honours.
+    ///
+    /// The Paper companion applies the same bounds in `ServerConfig.normalize()`
+    /// and does so silently, so an out-of-range value is a configuration to
+    /// correct, not something worth warning about on every reload.
+    fn normalize(&mut self) {
+        self.max_waypoints_per_world = self.max_waypoints_per_world.clamp(1, 512);
+        // The per-player ceiling can never exceed what the world retains.
+        self.max_waypoints_per_player = self
+            .max_waypoints_per_player
+            .clamp(1, self.max_waypoints_per_world);
+        self.waypoint_mutations_per_minute = self.waypoint_mutations_per_minute.clamp(1, 6000);
     }
 }
 
@@ -330,6 +401,41 @@ fn parse(source: &str, warnings: &mut Vec<String>) -> Config {
             "worldgen" => config.worldgen_override = non_empty(value),
             "world_id" => config.world_id_override = non_empty(value),
             "dims" => config.dims = parse_dims(&value),
+            "share_waypoints" => match parse_bool(&value) {
+                Some(enabled) => config.share_waypoints = enabled,
+                None => warnings.push(format!(
+                    "line {number}: `share_waypoints = {value}` is not a boolean; keeping {}",
+                    config.share_waypoints
+                )),
+            },
+            "allow_non_operator_waypoint_management" => match parse_bool(&value) {
+                Some(allowed) => config.allow_non_operator_waypoint_management = allowed,
+                None => warnings.push(format!(
+                    "line {number}: `allow_non_operator_waypoint_management = {value}` is not a boolean; keeping {}",
+                    config.allow_non_operator_waypoint_management
+                )),
+            },
+            "max_waypoints_per_world" => match parse_u32(&value) {
+                Some(limit) => config.max_waypoints_per_world = limit,
+                None => warnings.push(format!(
+                    "line {number}: `max_waypoints_per_world = {value}` is not a positive integer; keeping {}",
+                    config.max_waypoints_per_world
+                )),
+            },
+            "max_waypoints_per_player" => match parse_u32(&value) {
+                Some(limit) => config.max_waypoints_per_player = limit,
+                None => warnings.push(format!(
+                    "line {number}: `max_waypoints_per_player = {value}` is not a positive integer; keeping {}",
+                    config.max_waypoints_per_player
+                )),
+            },
+            "waypoint_mutations_per_minute" => match parse_u32(&value) {
+                Some(rate) => config.waypoint_mutations_per_minute = rate,
+                None => warnings.push(format!(
+                    "line {number}: `waypoint_mutations_per_minute = {value}` is not a positive integer; keeping {}",
+                    config.waypoint_mutations_per_minute
+                )),
+            },
             _ => unknown.push(key),
         }
     }
@@ -341,6 +447,7 @@ fn parse(source: &str, warnings: &mut Vec<String>) -> Config {
             unknown.join(", ")
         ));
     }
+    config.normalize();
     config
 }
 
@@ -459,6 +566,16 @@ fn parse_bool(raw: &str) -> Option<bool> {
         "1" | "true" | "yes" | "on" => Some(true),
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
+    }
+}
+
+/// Parses a positive integer setting. Zero is rejected as well as non-integers:
+/// an explicit `0` reads as "disabled/unset", and the caller's warning is more
+/// useful than silently substituting the minimum.
+fn parse_u32(raw: &str) -> Option<u32> {
+    match raw.trim().parse::<u32>() {
+        Ok(0) | Err(_) => None,
+        Ok(value) => Some(value),
     }
 }
 
@@ -649,5 +766,67 @@ mod tests {
         let spec = spec_for("mymod:arena");
         assert_eq!(spec.kind, "arena");
         assert!(!spec.predictable);
+    }
+
+    #[test]
+    fn parses_the_waypoint_settings() {
+        let config = parse_quiet(
+            r#"
+            share_waypoints = false
+            allow_non_operator_waypoint_management = false
+            max_waypoints_per_world = 256
+            max_waypoints_per_player = 32
+            waypoint_mutations_per_minute = 120
+            "#,
+        );
+        assert!(!config.share_waypoints);
+        assert!(!config.allow_non_operator_waypoint_management);
+        assert_eq!(config.max_waypoints_per_world, 256);
+        assert_eq!(config.max_waypoints_per_player, 32);
+        assert_eq!(config.waypoint_mutations_per_minute, 120);
+    }
+
+    #[test]
+    fn a_bad_waypoint_value_warns_and_keeps_the_default() {
+        let source = "share_waypoints = maybe\nmax_waypoints_per_world = -1\n\
+                      max_waypoints_per_player = 0\nwaypoint_mutations_per_minute = many\n";
+        let warnings = warnings_for(source);
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        let config = parse_quiet(source);
+        // A zero limit is a typo, not a request to clamp to the minimum.
+        assert!(config.share_waypoints);
+        assert_eq!(config.max_waypoints_per_world, 512);
+        assert_eq!(config.max_waypoints_per_player, 64);
+        assert_eq!(config.waypoint_mutations_per_minute, 30);
+    }
+
+    #[test]
+    fn waypoint_limits_are_clamped_into_range() {
+        // The world cap clamps first, and the per-player cap then follows it.
+        let config = parse_quiet(
+            "max_waypoints_per_world = 2000\nmax_waypoints_per_player = 9999\n\
+             waypoint_mutations_per_minute = 99999\n",
+        );
+        assert_eq!(config.max_waypoints_per_world, 512);
+        assert_eq!(config.max_waypoints_per_player, 512);
+        assert_eq!(config.waypoint_mutations_per_minute, 6000);
+        // Clamping is silent: it is not a parse failure.
+        assert!(warnings_for("max_waypoints_per_world = 2000\n").is_empty());
+    }
+
+    #[test]
+    fn the_template_documents_every_waypoint_setting() {
+        for key in [
+            "share_waypoints",
+            "allow_non_operator_waypoint_management",
+            "max_waypoints_per_world",
+            "max_waypoints_per_player",
+            "waypoint_mutations_per_minute",
+        ] {
+            assert!(
+                TEMPLATE.contains(&format!("# {key} =")),
+                "template is missing a commented `{key}` key"
+            );
+        }
     }
 }

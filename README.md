@@ -16,41 +16,48 @@
 
 ## 功能支持
 
-本插件实现 confluxmap 在 Pumpkin 上的最小可用形态：**只下发种子**，由客户端在本地生成
-预测地图，权威纠错保持关闭。下表按「是否做得出来」分三档；判定方法与逐条证据（含
-Pumpkin 源码位置）见 [docs/pumpkin-capabilities.md](docs/pumpkin-capabilities.md)。
+本插件实现 confluxmap 在 Pumpkin 上的可用形态：**下发种子**，由客户端在本地生成
+预测地图；权威纠错保持关闭。公共路径点与子世界标识已在 v0.1.1 一并实现。下表按
+「是否做得出来」分三档；判定方法与逐条证据（含 Pumpkin 源码位置）见
+[docs/pumpkin-capabilities.md](docs/pumpkin-capabilities.md)。
 
 ### 已支持
 
 | 能力 | 说明 |
 |---|---|
-| 通道声明 | 登录时以 `minecraft:register` 向客户端宣告 `confluxmap:map_sync`。Paper 由服务端代发，Pumpkin 无此 API，不宣告则客户端不会发起握手 |
-| 握手应答 | 收到 `HELLO` 后应答一帧 `HELLO_POLICY`；握手在单次往返内完成，其后不再有往来消息 |
+| 通道声明 | 登录时以 `minecraft:register` 向客户端宣告 `confluxmap:map_sync` 与 `confluxmap:waypoints_v1`。Paper 由服务端代发，Pumpkin 无此 API，不宣告则客户端不会发起握手 |
+| 握手应答 | 收到 `HELLO` 后应答 `HELLO_POLICY`；带能力报价的客户端在此之前还会收到 `0x12` / `0x13`。握手在单次往返内完成，其后不再有往来消息 |
 | 世界种子 | 置 `seedGranted = 1`，逐维度附带种子 |
 | worldgen 版本 | 客户端据此选择地形生成参数 |
 | 世界 ID | 客户端用作地图缓存的命名空间 |
 | 维度列表 | 逐维度给出可预测性与生成器 preset；默认仅 `minecraft:overworld` |
-| 限流预算声明 | 策略中携带 `Budgets` 字段。本插件不应答任何请求，该字段仅用于满足客户端解析不得退化的要求 |
+| 限流预算声明 | 策略中携带 `Budgets` 字段。该通道上插件除 `HELLO` 外不应答任何请求，该字段仅用于满足客户端解析不得退化的要求 |
 | 种子共享开关 | 置 `share_seed = false` 时改发 `seedGranted = 0` |
 | 关闭权威纠错 | `correctionsEnabled = 0`，客户端据此进入 `SERVER_DISABLED`：会话保持 ACTIVE、种子可用，但不请求权威补丁 |
+| 子世界标识 | 对在 `predictorVersion` 里声明能力报价的客户端授予 `SERVER_INSTANCE`（能力 id 7），握手回复 `0x13` 携带本实例 UUID；客户端以此为存储命名空间，从而区分 Velocity 之后共用同一 worldId 的多个子世界 |
+| 公共路径点 | 独立通道 `confluxmap:waypoints_v1`（协议 1.3）：订阅、创建、修改、删除与广播，语义同上游 |
 | 载荷校验 | 严格解码：类型字节、UTF-8 长度上限、整帧必须恰好消费完 |
-| 运维命令 | `/cfm status`、`/cfm seed`、`/cfm hello`、`/cfm reload` |
+| 运维命令 | `/cfm status`、`/cfm seed`、`/cfm hello`、`/cfm reload`、`/cfm waypoints` |
+
+子世界标识与公共路径点的握手帧序、能力协商与消息语义见
+[docs/protocol.md](docs/protocol.md)。两处与上游的差异：实例 id 与路径点均持久化在
+插件私有数据目录（WASI 沙箱只开放该目录，插件读不到世界存档目录）；路径点的高度校验
+沿用客户端的坐标边界（|coord| ≤ 3000 万、水平 ≤ 29999984），因为 Pumpkin 未向插件暴露
+世界高度上下限。
 
 ### 未支持：宿主能力具备，本插件尚未实现
 
-这些在 Pumpkin 上做得出来，只是不在最小形态的范围内。
+这些在 Pumpkin 上做得出来，只是不在当前形态的范围内。
 
 | 能力 | 说明 |
 |---|---|
-| 公共路径点 | 上游的 `confluxmap:waypoints_v1` 通道：创建、修改、删除、订阅与广播。所需能力（自定义载荷双向、在线玩家枚举、进退事件、op 查询、私有目录持久化、命令注册）均已具备 |
 | 玩家位置广播 | 实体雷达所需的在线玩家位置流，依赖每 tick 任务与玩家位置读取 |
 | 视距下发 | `SERVER_VIEW_DISTANCE` |
-| 服务端实例 ID | `SERVER_INSTANCE`，需在私有目录持久化一个 UUID |
 | 策略热更 | `POLICY_UPDATE`，在会话中途变更策略 |
-| 能力与兼容性协商 | `MAP_CAPABILITIES` / `MAP_COMPATIBILITY`。当前刻意不下发，以便客户端走 `SERVER_DISABLED` 兜底 |
-| 网页地图 | 上游是 HTTP + WebSocket 服务。Pumpkin 允许插件监听 TCP（WASI sockets，需申请 `network.tcp.bind`），但没有 HTTP 服务端接口，协议须自行实现；且上游瓦片来自读存档的纠错服务，此处只能退化为浏览器端按种子预测 |
+| 能力协商（纠错） | `MAP_CAPABILITIES`（`0x12`）只用于授予 `SERVER_INSTANCE`，不协商纠错能力；`MAP_COMPATIBILITY`（`0x10`）不下发 |
+| 网页地图 | 上游是 HTTP + WebSocket 服务。Pumpkin 允许插件监听 TCP（WASI sockets，需申请 `network.tcp.bind`），但没有 HTTP 服务端接口，协议须自行实现；且上游瓦片来自读存档的纠错服务，此处只能退化为浏览器端按种子预测——在权威纠错不成立的前提下，这只是把客户端已有的本地预测重算一遍，因此不做 |
 | 结构化错误 | `ERROR` 帧 |
-| 限流与防护 | 令牌桶、畸形包 strike 与静音、变更幂等缓存 |
+| 限流与防护 | 令牌桶、畸形包 strike 与静音、变更幂等缓存。公共路径点通道已按上游实现；主通道只做握手，不涉及 |
 | 运维管理面 | 上游的 `enable` / `disable` / `performance` 等命令 |
 
 ### 未支持：Pumpkin 侧无可行路径
@@ -132,10 +139,13 @@ python3 tools/test_inject_seed.py   # 种子写入脚本的回归测试
 | `/cfm seed` | 显示当前下发的种子、世界 ID 与 worldgen 版本 |
 | `/cfm hello` | 回放最近若干次握手的解析结果，以及最后一帧策略的字节 |
 | `/cfm reload` | 重新读取配置文件 |
+| `/cfm waypoints` | 公共路径点的状态：开关、通道、当前 revision 与配额、存储位置 |
+| `/cfm waypoints list [page]` | 分页列出路径点，每页 6 条 |
+| `/cfm waypoints clear` | 清空路径点目录，逐点产生 `REMOVE` 增量并落盘 |
 
 ## 配置文件
 
-`plugins/data/confluxmap-pumpkin/config.toml`，首次加载时由插件写出，全部键均以注释形式给出。插件向宿主申请的权限为 `fs.read.data` 与 `fs.write.data`，即只限该私有目录，不申请环境变量、网络或其他权限。
+`plugins/data/confluxmap-pumpkin/config.toml`，首次加载时由插件写出，全部键均以注释形式给出，`/cfm reload` 即时重读。插件向宿主申请的权限为 `fs.read.data` 与 `fs.write.data`，即只限该私有目录，不申请环境变量、网络或其他权限。
 
 | 键 | 必填 | 说明 |
 |---|---|---|
@@ -144,20 +154,46 @@ python3 tools/test_inject_seed.py   # 种子写入脚本的回归测试
 | `worldgen` | 否 | 显式指定 worldgen 版本串；缺省由服务端版本串解析 |
 | `world_id` | 否 | 显式指定世界 ID；缺省由种子派生为 `00000000-0000-0000-0000-<种子低 48 位>` |
 | `dims` | 否 | 维度 id 列表，可写逗号分隔的字符串或 TOML 数组；缺省仅 `minecraft:overworld`。已知原版维度标记为可预测，其余按不可预测处理 |
+| `share_waypoints` | 否 | 是否服务公共路径点通道 `confluxmap:waypoints_v1`；缺省 `true`。置 `false` 时目录不再载入与变更，请求一律以「功能已禁用」驳回 |
+| `allow_non_operator_waypoint_management` | 否 | 是否允许非 op 管理自己发布的路径点；缺省 `true`。置 `false` 时仅 op 等级 ≥ 2 者可变更 |
+| `max_waypoints_per_world` | 否 | 单个世界的路径点总数上限，≤ 512；缺省 `512` |
+| `max_waypoints_per_player` | 否 | 单个玩家发布的路径点上限，≤ 上一项；缺省 `64` |
+| `waypoint_mutations_per_minute` | 否 | 单个玩家的变更配额（每分钟，1–6000）；缺省 `30` |
 
 解析规则宽松：每行一个 `key = value`，`#` 起注释，值可加引号。无法解析的值与未知的键只会在日志中告警并保留缺省值，不会导致插件加载失败。
+
+### 持久化文件
+
+同一私有目录下还有两个由插件维护的状态文件：
+
+| 文件 | 内容 |
+|---|---|
+| `server_instance.json` | 本实例的 UUID，形如 `{"uuid": "..."}`，与上游 `UuidFileStore` 同形。首次使用时生成并写入；文件不可读时重新生成并告警 |
+| `shared_waypoints.json` | 公共路径点目录，schema 2，文档形状与上游一致。损坏的文件隔离为 `.bad` 后重建；schema 更高的文档保留不动且功能置为不可用；带着别的服务端 `ownerInstanceId` 的文档改名为 `.bak` |
 
 ## 目录
 
 ```
 src/protocol.rs  线协议编解码，逐字节镜像 confluxmap 的 MsgCodec.java
-src/channel.rs   向客户端声明 confluxmap:map_sync 通道
+src/channel.rs   向客户端声明 confluxmap:map_sync 与 confluxmap:waypoints_v1 通道
 src/config.rs    插件配置文件（模板、解析与校验）
 src/handshake.rs HELLO -> HELLO_POLICY 应答逻辑
 src/commands.rs  /cfm 命令树
 src/state.rs     配置快照、计数器与通道声明的去重
+src/identity.rs  服务端实例 id 的生成与持久化
+src/json.rs     最小 JSON 读写（实例 id 与路径点文档的落盘）
+src/wire.rs     字节序读写原语
+src/clock.rs    墙钟时间源，供 createdAtEpochMs 与限流使用
+src/waypoints/   公共路径点
+  proto.rs       confluxmap:waypoints_v1 消息编解码（协议 1.3）
+  model.rs       路径点模型与坐标校验
+  store.rs       目录状态、revision 与配额
+  persist.rs     shared_waypoints.json 的读写与损坏隔离
+  service.rs     变更裁决、增量与限流
+  session.rs     单连接会话状态与畸形包静音
+  mod.rs         事件接入与广播
 src/lib.rs       Plugin 入口与事件注册
-docs/protocol.md             HELLO / HELLO_POLICY 线格式与客户端判定链路
+docs/protocol.md             两个通道的线格式、握手帧序与客户端判定链路
 docs/pumpkin-capabilities.md Pumpkin 宿主能力核查与逐项功能可行性
 tools/PolicyVector.java      以参考 Java 编码器生成黄金向量
 tools/inject_seed.py         由 pumpkin.toml 幂等写入插件配置

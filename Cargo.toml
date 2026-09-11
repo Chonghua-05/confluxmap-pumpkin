@@ -1,6 +1,6 @@
 [package]
 name = "confluxmap-pumpkin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "ConfluxMap companion for the Pumpkin Minecraft server: hands confluxmap clients the world seed and worldgen version so they can render the predicted map."
 license = "LGPL-3.0-or-later"

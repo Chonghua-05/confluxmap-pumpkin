@@ -1,4 +1,4 @@
-//! Declaring `confluxmap:map_sync` to the client.
+//! Declaring the confluxmap companion channels to the client.
 //!
 //! Registering event handlers is only half of a plugin-message channel. A
 //! confluxmap client refuses to send its HELLO unless the **server has already
@@ -12,7 +12,14 @@
 //! NUL-separated channel list. That is exactly the packet a Paper server sends
 //! on the plugin's behalf.
 //!
-//! This is why the channel must be declared **on login/join**, not lazily in
+//! There are two channels - `confluxmap:map_sync` for the handshake and policy
+//! exchange, and `confluxmap:waypoints_v1` for the shared waypoint directory -
+//! and a client may use either on its own. Both are announced together in one
+//! payload so that each is known before the client's join callback runs; the
+//! body carries every name with a trailing NUL, which is what [`register_body`]
+//! already produces for a list.
+//!
+//! This is why the channels must be declared **on login/join**, not lazily in
 //! reply to something: the client sends HELLO from its own join callback, so a
 //! declaration that arrives afterwards is too late for that session.
 
@@ -22,6 +29,16 @@ use crate::protocol;
 
 /// The vanilla control channel used to announce plugin-message channels.
 pub const REGISTER_CHANNEL: &str = "minecraft:register";
+
+/// The companion channels this plugin announces to every joining client.
+///
+/// Kept in one place so the login/join declarer, the tests and any future
+/// introspection all agree on the set and its order. The order is part of the
+/// payload and therefore stable: `confluxmap:map_sync` first, because it is the
+/// channel the handshake depends on, then `confluxmap:waypoints_v1`.
+pub fn declared_channels() -> Vec<&'static str> {
+    vec![protocol::CHANNEL_ID, crate::waypoints::CHANNEL_ID]
+}
 
 /// Body of a `minecraft:register` payload for `channels`.
 ///
@@ -36,7 +53,7 @@ pub fn register_body(channels: &[&str]) -> Vec<u8> {
     body
 }
 
-/// Announces the companion channel to `player`.
+/// Announces the companion channels to `player`.
 ///
 /// Idempotent from the client's point of view: the client keeps a set, so a
 /// repeated announcement is a no-op. Returns `false` when the player is a
@@ -45,7 +62,7 @@ pub fn declare_companion_channel(player: &Player) -> bool {
     let Some(java) = player.as_java() else {
         return false;
     };
-    let body = register_body(&[protocol::CHANNEL_ID]);
+    let body = register_body(&declared_channels());
     java.send_custom_payload(REGISTER_CHANNEL, &body);
     true
 }
@@ -95,5 +112,38 @@ mod tests {
         let body = register_body(&[protocol::CHANNEL_ID]);
         assert!(body.ends_with(b"\0"));
         assert_eq!(body.len(), protocol::CHANNEL_ID.len() + 1);
+    }
+
+    #[test]
+    fn the_declared_set_is_the_companion_channels_in_a_stable_order() {
+        assert_eq!(
+            declared_channels(),
+            vec![protocol::CHANNEL_ID, crate::waypoints::CHANNEL_ID]
+        );
+    }
+
+    #[test]
+    fn both_channels_travel_in_one_payload_each_nul_terminated() {
+        let channels = declared_channels();
+        let body = register_body(&channels);
+
+        // Rebuild the expected body from the set: every name followed by a NUL,
+        // including the last one, so a client splitting on NUL sees exactly the
+        // two channels and no trailing empty entry.
+        let expected: Vec<u8> = channels
+            .iter()
+            .flat_map(|channel| channel.as_bytes().iter().copied().chain(std::iter::once(0)))
+            .collect();
+        assert_eq!(body, expected);
+        assert_eq!(
+            body.iter().filter(|&&byte| byte == 0).count(),
+            channels.len()
+        );
+        assert!(body.ends_with(b"\0"));
+    }
+
+    #[test]
+    fn the_two_companion_channels_are_distinct() {
+        assert_ne!(protocol::CHANNEL_ID, crate::waypoints::CHANNEL_ID);
     }
 }

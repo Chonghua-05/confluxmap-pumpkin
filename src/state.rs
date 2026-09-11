@@ -39,6 +39,26 @@ pub fn data_folder() -> Option<&'static str> {
     DATA_FOLDER.get().map(String::as_str)
 }
 
+/// This server's instance identifier, chosen once in `on_load`.
+///
+/// It is global rather than threaded through every call because a handshake
+/// needs it per player while the value itself is fixed for the process: it names
+/// this server in the client's cache, so it must stay identical across every
+/// player of a session.
+static INSTANCE_ID: OnceLock<String> = OnceLock::new();
+
+/// Remembers the instance id chosen at load time.
+pub fn set_instance_id(id: String) {
+    // Same reasoning as `DATA_FOLDER`: a second `on_load` cannot run without an
+    // intervening unload, so losing this race only keeps the first (identical) id.
+    let _ = INSTANCE_ID.set(id);
+}
+
+/// The instance id, once the plugin has been loaded.
+pub fn instance_id() -> Option<&'static str> {
+    INSTANCE_ID.get().map(String::as_str)
+}
+
 static HELLOS_SEEN: AtomicU64 = AtomicU64::new(0);
 static POLICIES_SENT: AtomicU64 = AtomicU64::new(0);
 static SEND_FAILURES: AtomicU64 = AtomicU64::new(0);

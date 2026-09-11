@@ -5,15 +5,30 @@
 //! multi-byte value is big-endian; strings are a `u16` byte length followed by
 //! raw UTF-8 bytes (`writeUtf` / `readUtf`).
 //!
-//! Only the two messages the v1 server needs are implemented:
+//! Four messages are implemented:
 //!
-//! * `0x01 C2S HELLO` - the client announces its versions.
-//! * `0x02 S2C HELLO_POLICY` - the server answers with the seed + worldgen
-//!   version and explicitly disables corrections.
+//! * `0x01 C2S HELLO` - the client announces its versions, and - since protocol
+//!   major 4 - carries a capability offer appended to `predictorVersion`.
+//! * `0x12 S2C MAP_CAPABILITIES` - the server's capability selection, sent only
+//!   to a client that offered one.
+//! * `0x13 S2C SERVER_INSTANCE` - this server instance's id, sent only once the
+//!   client has been granted the `SERVER_INSTANCE` capability.
+//! * `0x02 S2C HELLO_POLICY` - the seed + worldgen version, corrections off.
 //!
 //! The client treats a policy with `correctionsEnabled = 0` as
 //! `ClientMode.SERVER_DISABLED`: the session stays ACTIVE, the seed stays
 //! usable, and the client simply never asks for authoritative patches.
+//!
+//! # Why the handshake is not one frame
+//!
+//! `SERVER_INSTANCE` is capability-gated, and a capability exists only because
+//! the client offered it *and* the server selected it in `0x12`. A client that
+//! receives `0x13` without a matching selection refuses it outright
+//! (`NegotiatedMapSync.requireCapability`). So the order is fixed:
+//! `0x12` selection, then `0x13`, then `0x02` - and the policy last, because
+//! the client opens its session on the policy frame.
+
+use crate::wire;
 
 /// Registered plugin-messaging channel (`Proto.CHANNEL_ID`).
 pub const CHANNEL_ID: &str = "confluxmap:map_sync";
@@ -22,11 +37,42 @@ pub const CHANNEL_ID: &str = "confluxmap:map_sync";
 pub const MSG_HELLO_C2S: u8 = 0x01;
 /// `0x02 S2C HELLO_POLICY` (`Proto.MSG_HELLO_POLICY_S2C`).
 pub const MSG_HELLO_POLICY_S2C: u8 = 0x02;
+/// `0x12 S2C MAP_CAPABILITIES` (`Proto.MSG_MAP_CAPABILITIES_S2C`).
+pub const MSG_MAP_CAPABILITIES_S2C: u8 = 0x12;
+/// `0x13 S2C SERVER_INSTANCE` (`Proto.MSG_SERVER_INSTANCE_S2C`).
+pub const MSG_SERVER_INSTANCE_S2C: u8 = 0x13;
 
 /// Hard cap on any UTF-8 field (`Proto.MAX_UTF8_BYTES`).
 pub const MAX_UTF8_BYTES: usize = 256;
 /// Hard cap on per-dimension entries (`Proto.MAX_DIM_ENTRIES`).
 pub const MAX_DIM_ENTRIES: usize = 8;
+
+/// Negotiation envelope version (`MapSyncProtocol.NEGOTIATION_VERSION`).
+pub const NEGOTIATION_VERSION: u8 = 2;
+/// The marker that introduces a capability offer inside `predictorVersion`.
+pub const CAPS_MARKER: &str = "|caps2:";
+/// Cap on offered/selected capability entries (`MapSyncProtocol.MAX_CAPABILITIES`).
+pub const MAX_CAPABILITIES: usize = 32;
+/// Cap on offered correction profiles (`MapSyncProtocol.MAX_CORRECTION_PROFILES`).
+pub const MAX_CORRECTION_PROFILES: usize = 8;
+
+/// `MapSyncCapability.SERVER_INSTANCE`: the only capability this plugin grants.
+///
+/// The other seven are correction-related, and `PLAYER_POSITIONS` comes with the
+/// radar stream. Granting one this plugin does not implement would leave the
+/// client waiting for messages that never arrive, so they are withheld.
+pub const CAP_SERVER_INSTANCE: u8 = 7;
+/// `MapSyncCapability.SERVER_INSTANCE`'s version (`MapSyncCapability.version()`).
+pub const CAP_SERVER_INSTANCE_VERSION: u8 = 1;
+/// `MapCompatibilityS2C.MODE_DISABLED`.
+pub const CORRECTION_MODE_DISABLED: u8 = 2;
+/// `MapCompatibilityS2C.REASON_NO_COMMON_WIRE`.
+pub const REASON_NO_COMMON_WIRE: u8 = 2;
+/// `CorrectionProfile.SOURCE_LIGHT_V2.id()`.
+///
+/// Reported for shape compatibility only. With the mode disabled the client
+/// never decodes a correction body, so this selects nothing concrete.
+pub const CORRECTION_PROFILE_SOURCE_LIGHT_V2: u8 = 2;
 
 /// The `HELLO_POLICY` flag byte's bit vocabulary, named so the wire contract is
 /// complete and future correction-capable builds have the bits defined rather
@@ -148,50 +194,6 @@ pub struct HelloC2S {
     pub predictor_version: String,
 }
 
-/// Bounds-checked big-endian cursor over an untrusted payload.
-///
-/// Every read returns `Option`; a truncated or oversized field is a clean
-/// `None` rather than a panic, because the payload arrives from the network.
-struct Reader<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Reader { buf, pos: 0 }
-    }
-
-    fn u8(&mut self) -> Option<u8> {
-        let v = *self.buf.get(self.pos)?;
-        self.pos += 1;
-        Some(v)
-    }
-
-    fn u16(&mut self) -> Option<u16> {
-        let hi = u16::from(*self.buf.get(self.pos)?);
-        let lo = u16::from(*self.buf.get(self.pos + 1)?);
-        self.pos += 2;
-        Some((hi << 8) | lo)
-    }
-
-    /// Mirrors `MsgCodec.readUtf`: `u16` byte length, capped at
-    /// [`MAX_UTF8_BYTES`], then that many UTF-8 bytes.
-    fn utf(&mut self) -> Option<String> {
-        let len = usize::from(self.u16()?);
-        if len > MAX_UTF8_BYTES {
-            return None;
-        }
-        let slice = self.buf.get(self.pos..self.pos + len)?;
-        self.pos += len;
-        core::str::from_utf8(slice).ok().map(str::to_owned)
-    }
-
-    fn remaining(&self) -> usize {
-        self.buf.len() - self.pos
-    }
-}
-
 /// Decodes a `0x01 HELLO_C2S`.
 ///
 /// Returns `None` for anything that is not exactly one HELLO frame, including
@@ -199,12 +201,12 @@ impl<'a> Reader<'a> {
 /// the reference `MsgCodec.decode` rejects trailing bytes and this decoder
 /// keeps that strictness so a desynced client cannot be misread.
 pub fn parse_hello_c2s(data: &[u8]) -> Option<HelloC2S> {
-    let mut r = Reader::new(data);
+    let mut r = wire::Reader::new(data);
     if r.u8()? != MSG_HELLO_C2S {
         return None;
     }
-    let mod_version = r.utf()?;
-    let predictor_version = r.utf()?;
+    let mod_version = r.utf(MAX_UTF8_BYTES)?;
+    let predictor_version = r.utf(MAX_UTF8_BYTES)?;
     if r.remaining() != 0 {
         return None;
     }
@@ -212,6 +214,170 @@ pub fn parse_hello_c2s(data: &[u8]) -> Option<HelloC2S> {
         mod_version,
         predictor_version,
     })
+}
+
+/// What a client's HELLO said about its own capabilities.
+///
+/// A protocol-major-4 client appends a legacy advertisement and then a
+/// `|caps2:`-introduced, base64url-encoded offer to `predictorVersion`. That
+/// field is the *only* place a client can advertise anything: the HELLO frame's
+/// shape is unchanged, so this data has to travel inside a string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Offer {
+    /// The predictor identity proper, with the appended advertisement removed.
+    /// A server that shares a baseline compares this; this plugin only logs it.
+    pub predictor: String,
+    /// Whether the client wrapped its advertisement in a capability offer.
+    pub caps2: bool,
+    /// Whether the offer included `SERVER_INSTANCE` at a usable version.
+    pub server_instance: bool,
+}
+
+/// Parses the `predictorVersion` field of a HELLO.
+///
+/// Every failure path mirrors `MapSyncProtocol.parseOffer`: a malformed offer
+/// still reports `caps2`, because the client clearly believes it sent one and
+/// answering it is how the two sides agree on *no* capabilities. Only a field
+/// with no marker at all is treated as a legacy client.
+pub fn parse_offer(field: &str) -> Offer {
+    let predictor = match field.find("|sync:") {
+        // Everything before the advertisement tokens is the predictor identity.
+        Some(index) => &field[..index],
+        None => field,
+    };
+    let Some(marker) = field.find(CAPS_MARKER) else {
+        return Offer {
+            predictor: predictor.to_string(),
+            caps2: false,
+            server_instance: false,
+        };
+    };
+    let rest = &field[marker + CAPS_MARKER.len()..];
+    let encoded = match rest.find('|') {
+        Some(index) => &rest[..index],
+        None => rest,
+    };
+    let capabilities = decode_offer(encoded);
+    Offer {
+        predictor: predictor.to_string(),
+        caps2: true,
+        server_instance: capabilities
+            .iter()
+            .any(|(id, version)| *id == CAP_SERVER_INSTANCE && *version > 0),
+    }
+}
+
+/// Decodes the capability offer, returning the capabilities the client claims.
+///
+/// An empty result is the correct answer for anything structurally wrong: the
+/// caller then selects no capabilities, which is a no-op for both sides.
+fn decode_offer(encoded: &str) -> Vec<(u8, u8)> {
+    let Some(bytes) = base64_url_decode(encoded) else {
+        return Vec::new();
+    };
+    let mut r = wire::Reader::new(&bytes);
+    let Some(version) = r.u8() else {
+        return Vec::new();
+    };
+    if version != NEGOTIATION_VERSION {
+        return Vec::new();
+    }
+    let Some(profile_count) = r.u8() else {
+        return Vec::new();
+    };
+    if profile_count < 1 || usize::from(profile_count) > MAX_CORRECTION_PROFILES {
+        return Vec::new();
+    }
+    let mut profiles = 0usize;
+    for _ in 0..profile_count {
+        if r.u8().is_none() {
+            return Vec::new();
+        }
+        profiles += 1;
+    }
+    let Some(capability_count) = r.u8() else {
+        return Vec::new();
+    };
+    if usize::from(capability_count) > MAX_CAPABILITIES {
+        return Vec::new();
+    }
+    let mut offered: Vec<(u8, u8)> = Vec::new();
+    for _ in 0..capability_count {
+        let (Some(id), Some(version)) = (r.u8(), r.u8()) else {
+            return Vec::new();
+        };
+        if version == 0 {
+            continue;
+        }
+        match offered.iter_mut().find(|(seen, _)| *seen == id) {
+            Some(entry) => entry.1 = entry.1.max(version),
+            None => offered.push((id, version)),
+        }
+    }
+    if r.remaining() != 0 || profiles == 0 {
+        return Vec::new();
+    }
+    offered
+}
+
+/// Decodes unpadded base64url, tolerating `=` padding.
+fn base64_url_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let mut accumulator: u32 = 0;
+    let mut bits: u32 = 0;
+    for byte in text.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => u32::from(byte - b'A'),
+            b'a'..=b'z' => u32::from(byte - b'a') + 26,
+            b'0'..=b'9' => u32::from(byte - b'0') + 52,
+            b'-' => 62,
+            b'_' => 63,
+            b'=' => continue,
+            _ => return None,
+        };
+        accumulator = (accumulator << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((accumulator >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Builds the `0x12 MAP_CAPABILITIES` selection.
+///
+/// The correction fields report the state this plugin actually keeps: no
+/// correction profile is usable, so the mode is `DISABLED` with reason
+/// `NO_COMMON_WIRE`. That is the same frame the reference server sends when the
+/// client and server share no correction profile, and it is what makes the
+/// client accept everything else in the envelope.
+pub fn build_map_capabilities(server_mod_version: &str, capabilities: &[(u8, u8)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64);
+    out.push(MSG_MAP_CAPABILITIES_S2C);
+    wire::u8(&mut out, NEGOTIATION_VERSION);
+    write_utf(&mut out, server_mod_version);
+    // The baseline predictor identity. This plugin does not claim one, and the
+    // client only consults it for a residual correction stream it will not get.
+    write_utf(&mut out, "");
+    wire::u8(&mut out, CORRECTION_MODE_DISABLED);
+    wire::u8(&mut out, REASON_NO_COMMON_WIRE);
+    wire::u8(&mut out, CORRECTION_PROFILE_SOURCE_LIGHT_V2);
+    let capabilities = &capabilities[..capabilities.len().min(MAX_CAPABILITIES)];
+    wire::u8(&mut out, capabilities.len() as u8);
+    for (id, version) in capabilities {
+        wire::u8(&mut out, *id);
+        wire::u8(&mut out, *version);
+    }
+    out
+}
+
+/// Builds the `0x13 SERVER_INSTANCE` frame.
+pub fn build_server_instance(instance_id: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(48);
+    out.push(MSG_SERVER_INSTANCE_S2C);
+    write_utf(&mut out, instance_id);
+    out
 }
 
 /// Mirrors `MsgCodec.writeUtf`.
@@ -416,5 +582,107 @@ mod tests {
         let len = u16::from_be_bytes([out[0], out[1]]) as usize;
         assert_eq!(len, 255);
         assert!(core::str::from_utf8(&out[2..]).is_ok());
+    }
+
+    /// The offer a current client appends to `predictorVersion`, produced by the
+    /// reference `MapSyncProtocol.encodeOffer`: negotiation envelope 2, profiles
+    /// `MATERIAL_COLOR_V3, SOURCE_LIGHT_V2, LEGACY_V1`, then all eight
+    /// capabilities at version 1.
+    const REAL_OFFER: &str = "AgMDAgEIAQECAQMBBAEFAQYBBwEIAQ";
+
+    /// The same client's full `predictorVersion` field, marker included.
+    fn current_predictor_field(predictor: &str) -> String {
+        format!(
+            "{predictor}|sync:1|wire:4.0|patch:3|region:1|patch:4|region:2|source-light:1\
+             |server-view:1|caps2:{REAL_OFFER}"
+        )
+    }
+
+    #[test]
+    fn a_current_client_offers_the_server_instance_capability() {
+        let offer = parse_offer(&current_predictor_field("cubiomes-9f2c"));
+        assert_eq!(offer.predictor, "cubiomes-9f2c");
+        assert!(offer.caps2, "the caps2 marker must be recognised");
+        assert!(
+            offer.server_instance,
+            "capability 7 is in the real offer, so it must be seen"
+        );
+    }
+
+    #[test]
+    fn a_legacy_client_offers_nothing() {
+        // No advertisement at all: the whole field is the predictor identity.
+        let plain = parse_offer("probe-predictor-v0");
+        assert_eq!(plain.predictor, "probe-predictor-v0");
+        assert!(!plain.caps2);
+        assert!(!plain.server_instance);
+
+        // Advertises negotiation support but not capabilities.
+        let legacy = parse_offer("probe|sync:1|wire:4.0|server-view:1");
+        assert_eq!(legacy.predictor, "probe");
+        assert!(!legacy.caps2);
+    }
+
+    #[test]
+    fn a_malformed_offer_still_counts_as_one() {
+        // The client clearly meant to send an offer; the reference server
+        // answers it with an empty selection instead of ignoring it.
+        let broken = parse_offer("pred|caps2:$$$$$");
+        assert!(broken.caps2);
+        assert!(!broken.server_instance);
+
+        // A structurally valid offer that simply does not include capability 7.
+        let narrow = parse_offer("pred|caps2:AgEBAQEB");
+        assert!(narrow.caps2, "envelope version 2 is enough to make it an offer");
+        assert!(!narrow.server_instance);
+
+        // A different envelope version is not something we can read.
+        let future = parse_offer("pred|caps2:AwEBAQEB");
+        assert!(future.caps2);
+        assert!(!future.server_instance);
+    }
+
+    #[test]
+    fn the_advertisement_inside_the_field_is_not_part_of_the_predictor() {
+        // Only the tokens before `|sync:` identify the predictor; logging the
+        // whole field would put a base64 blob in every handshake line.
+        let offer = parse_offer(&current_predictor_field("probe-predictor-v0"));
+        assert_eq!(offer.predictor, "probe-predictor-v0");
+    }
+
+    #[test]
+    fn the_selection_frame_matches_the_reference_shape() {
+        let frame = build_map_capabilities("0.1.1", &[(CAP_SERVER_INSTANCE, 1)]);
+        assert_eq!(crate::state::hex(&frame), "12020005302e312e310000020202010701");
+        assert_eq!(frame[0], MSG_MAP_CAPABILITIES_S2C);
+    }
+
+    #[test]
+    fn an_empty_selection_is_still_a_well_formed_envelope() {
+        let frame = build_map_capabilities("0.1.1", &[]);
+        assert_eq!(crate::state::hex(&frame), "12020005302e312e31000002020200");
+        // The capability count is the last byte.
+        assert_eq!(*frame.last().expect("non-empty"), 0);
+    }
+
+    #[test]
+    fn the_instance_frame_carries_the_id_verbatim() {
+        let frame = build_server_instance(GOLDEN_WORLD_ID);
+        assert_eq!(frame[0], MSG_SERVER_INSTANCE_S2C);
+        assert_eq!(
+            crate::state::hex(&frame),
+            "13002430303030303030302d303030302d303030302d303030302d343536373839616263646566"
+        );
+        let mut r = wire::Reader::new(&frame[1..]);
+        assert_eq!(r.utf(MAX_UTF8_BYTES).as_deref(), Some(GOLDEN_WORLD_ID));
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn base64_url_decoding_rejects_foreign_characters() {
+        assert_eq!(base64_url_decode("AgMDAgEIAQECAQMBBAEFAQYBBwEIAQ").map(|b| b.len()), Some(22));
+        assert!(base64_url_decode("AgMDAgEIAQECAQMBBAEFAQYBBwEIAQ=").is_some());
+        assert_eq!(base64_url_decode("!!!!"), None);
+        assert_eq!(base64_url_decode(""), Some(Vec::new()));
     }
 }

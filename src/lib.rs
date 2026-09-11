@@ -1,43 +1,51 @@
 //! ConfluxMap companion for the [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin)
 //! Minecraft server.
 //!
-//! ConfluxMap predicts terrain from the world seed, so a multiplayer client needs
-//! two things from the server: the **seed** and the **worldgen version**. This
-//! plugin supplies exactly those and nothing else.
+//! The plugin serves two features over plugin messaging:
 //!
-//! On every `confluxmap:map_sync` HELLO it answers with a `HELLO_POLICY` that
-//! grants the seed and declares corrections disabled. The client then renders the
-//! predicted underlay locally and never asks for authoritative patches - which is
-//! what makes this plugin small enough to survive Pumpkin's API churn: it touches
-//! only plugin messaging, one event, a version string, and its own config file.
+//! * **Map sync** - on every `confluxmap:map_sync` HELLO it answers with a
+//!   `HELLO_POLICY` that grants the world **seed** and **worldgen version** and
+//!   declares corrections disabled. The client then renders the predicted
+//!   underlay locally and never asks for authoritative patches. The policy also
+//!   carries this server's **instance id** (see [`identity`]), so a client can
+//!   tell two servers sharing a seed apart.
+//! * **Public waypoints** - the `confluxmap:waypoints_v1` channel (see
+//!   [`waypoints`]) lets clients publish and browse a shared waypoint directory.
 //!
 //! The seed cannot be discovered (see [`config`]), so it is read from the
 //! plugin's data folder; that is the one directory the WASI sandbox opens.
 //!
-//! Because only a client with confluxmap installed registers that channel and
-//! sends a HELLO, the "modded clients only" requirement needs no player filtering.
+//! Because only a client with confluxmap installed registers either channel, the
+//! "modded clients only" requirement needs no player filtering.
 //!
-//! The plugin also **announces the channel to the client** on login/join (see
-//! [`channel`]). That is not optional: a confluxmap client gates its HELLO on the
-//! server having declared the channel first, which a Bukkit server does
-//! automatically and Pumpkin does not.
+//! The plugin also **announces the map_sync channel to the client** on
+//! login/join (see [`channel`]). That is not optional: a confluxmap client gates
+//! its HELLO on the server having declared the channel first, which a Bukkit
+//! server does automatically and Pumpkin does not.
 
 mod channel;
+mod clock;
 mod commands;
 mod config;
 mod handshake;
+mod identity;
+mod json;
 mod protocol;
 mod state;
+mod waypoints;
+mod wire;
 
 use pumpkin_plugin_api::{
     Context, Plugin, PluginMetadata, Result, Server,
+    command::ArgumentType,
     command::Command,
     command::CommandNode,
     events::{
         EventData, EventHandler, EventPriority, PlayerCustomPayloadEvent, PlayerJoinEvent,
-        PlayerLoginEvent, PlayerRegisterChannelEvent,
+        PlayerLeaveEvent, PlayerLoginEvent, PlayerRegisterChannelEvent,
     },
     permissions, register_plugin,
+    scheduler::SchedulerExt,
 };
 use tracing::{debug, info, warn};
 
@@ -119,7 +127,8 @@ impl EventHandler<PlayerJoinEvent> for JoinHandler {
     }
 }
 
-/// Runs the handshake whenever a client speaks on `confluxmap:map_sync`.
+/// Routes custom payloads by channel: the handshake replies on `map_sync`, and
+/// every waypoint message is delegated to the waypoints module.
 struct PayloadHandler;
 
 impl EventHandler<PlayerCustomPayloadEvent> for PayloadHandler {
@@ -128,16 +137,28 @@ impl EventHandler<PlayerCustomPayloadEvent> for PayloadHandler {
         server: Server,
         event: EventData<PlayerCustomPayloadEvent>,
     ) -> EventData<PlayerCustomPayloadEvent> {
-        // The channel carries other message types too; anything that is not a
-        // HELLO belongs to a fuller companion implementation and is ignored.
+        if event.channel == waypoints::CHANNEL_ID {
+            // The module owns its own framing and silently drops message types
+            // it does not know, so there is nothing to log or decode here.
+            // The server handle is what lets it broadcast a delta to the other
+            // subscribed players, not just reply to this one.
+            waypoints::on_payload(&server, &event.player, &event.data);
+            return event;
+        }
+
+        // The map_sync channel carries other message types too; anything that is
+        // not a HELLO belongs to a fuller companion implementation and is ignored.
         if event.channel != protocol::CHANNEL_ID {
             return event;
         }
 
         let version = state::server_version(&server);
-        if let handshake::Outcome::NotHello { type_byte } =
-            handshake::handle_payload(&event.player, &event.data, version.as_deref())
-        {
+        if let handshake::Outcome::NotHello { type_byte } = handshake::handle_payload(
+            &event.player,
+            &event.data,
+            version.as_deref(),
+            state::instance_id().unwrap_or_default(),
+        ) {
             info!(
                 "[confluxmap] ignored {} byte payload on {} from {} (type byte {type_byte:?})",
                 event.data.len(),
@@ -199,6 +220,25 @@ impl EventHandler<PlayerRegisterChannelEvent> for RegisterChannelHandler {
     }
 }
 
+/// Forgets a departing player's waypoint session state.
+///
+/// The waypoints module keeps per-player request/limiter state; without this it
+/// would leak for the lifetime of the server on a churny world. Persistence of
+/// the directory itself is not done here - it happens on every mutation, so an
+/// abrupt disconnect loses nothing.
+struct PlayerLeaveHandler;
+
+impl EventHandler<PlayerLeaveEvent> for PlayerLeaveHandler {
+    fn handle(
+        &self,
+        _server: Server,
+        event: EventData<PlayerLeaveEvent>,
+    ) -> EventData<PlayerLeaveEvent> {
+        waypoints::on_leave(&event.player);
+        event
+    }
+}
+
 /// The plugin itself.
 struct ConfluxMapPlugin;
 
@@ -251,6 +291,30 @@ impl Plugin for ConfluxMapPlugin {
                 config::operator_path()
             ),
         }
+        // The instance id is persisted and reused, so it must be resolved before
+        // any client can handshake; a fresh id tells the client this is a new
+        // world and its cached underlay is stale.
+        let instance = identity::load_or_create_instance(&data_folder);
+        state::set_instance_id(instance.id_string());
+        if let Some(warning) = instance.warning.as_deref() {
+            warn!("[confluxmap] {warning}");
+        }
+        info!(
+            "[confluxmap] instance id = {} ({})",
+            instance.id_string(),
+            if instance.created {
+                "newly created"
+            } else {
+                "loaded"
+            }
+        );
+
+        // The waypoint directory owns its own persisted store; `configure` opens
+        // it and returns anything that had to be quarantined or defaulted.
+        for note in waypoints::configure(&data_folder, &config, &config.world_id()) {
+            warn!("[confluxmap] {note}");
+        }
+
         state::set_config(config);
 
         context
@@ -268,21 +332,48 @@ impl Plugin for ConfluxMapPlugin {
         context
             .register_event_handler(JoinHandler, EventPriority::Low, false)
             .map_err(|e| format!("join handler: {e}"))?;
+        context
+            .register_event_handler(PlayerLeaveHandler, EventPriority::Normal, false)
+            .map_err(|e| format!("leave handler: {e}"))?;
         info!("[confluxmap] event handlers registered");
+
+        // Waypoint maintenance (expiry, dirty-store flush) is driven by the tick
+        // loop rather than by client traffic, so entries age out even when nobody
+        // is online to speak. 20 ticks is one second at the vanilla tick rate.
+        context.schedule_repeating_task(20, 20, |server| waypoints::on_tick(&server));
 
         let root = Command::new(&["cfm".to_string()], "ConfluxMap companion")
             .then(CommandNode::literal("status").execute(commands::StatusHandler))
             .then(CommandNode::literal("seed").execute(commands::SeedHandler))
             .then(CommandNode::literal("hello").execute(commands::HelloHandler))
-            .then(CommandNode::literal("reload").execute(commands::ReloadHandler));
+            .then(CommandNode::literal("reload").execute(commands::ReloadHandler))
+            .then(
+                CommandNode::literal("waypoints")
+                    .execute(commands::WaypointsHandler)
+                    .then(CommandNode::literal("list").execute(commands::WaypointsListHandler))
+                    // `list [page]` has no optional-argument primitive, so the
+                    // one-argument form is a separate branch under the same
+                    // literal; the server resolves whichever the sender typed.
+                    .then(
+                        CommandNode::literal("list").then(
+                            CommandNode::argument(
+                                commands::PAGE_ARGUMENT,
+                                &ArgumentType::Integer((Some(1), None)),
+                            )
+                            .execute(commands::WaypointsListHandler),
+                        ),
+                    )
+                    .then(CommandNode::literal("clear").execute(commands::WaypointsClearHandler)),
+            );
         context.register_command(root, "cfm.use");
-        info!("[confluxmap] /cfm registered (status|seed|hello|reload)");
+        info!("[confluxmap] /cfm registered (status|seed|hello|reload|waypoints)");
         info!("[confluxmap] load complete");
         info!("=================================================");
         Ok(())
     }
 
     fn on_unload(&self, _context: Context) -> Result<()> {
+        waypoints::on_unload();
         warn!("[confluxmap] unloaded");
         Ok(())
     }
