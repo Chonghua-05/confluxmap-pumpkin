@@ -10,9 +10,9 @@
 - 字节序：所有多字节整数 **大端**（big-endian）。
 - 字符串：`u16` 字节长度 + 原始 UTF-8 字节（`writeUtf`/`readUtf`），长度上限
   `MAX_UTF8_BYTES = 256`（即长度字段 >256 直接判非法）。
-- **无加密**：协议层不含任何对称/非对称加密、MAC 或签名。仅用 SHA-256 做
-  标识哈希（如 worldId 派生），另用 Deflater 做压缩。用户印象里"其他服务端
-  加密发送"在 confluxmap 代码库中不存在。
+- **无加密**：协议层不含任何对称/非对称加密、MAC 或签名，帧内亦无校验字段。
+  confluxmap 中的 SHA-256 与 Deflater 均用于协议之外（客户端缓存标识、区域文件
+  与 PNG 编码等）。
 - 整帧校验：`MsgCodec.decode` 要求**恰好消费完整个 payload**；多一个尾字节即
   解码失败。本插件的解码器保留同样的严格性。
 
@@ -95,7 +95,7 @@ mod 的玩家"的天然门控。
 
 `correctionsEnabled = 0` → 客户端进入 `ClientMode.SERVER_DISABLED`：
 会话保持 **ACTIVE**、种子可用、客户端自己用种子生成预测地图，但**从不**请求
-权威补丁。这正是我们想要的最小形态，且客户端原生支持，无需改客户端。
+权威补丁。这正是本插件的最小形态，且客户端原生支持，无需改客户端。
 
 这条路在客户端代码里是可逐行验证的，不依赖"大概能用"：
 
@@ -145,7 +145,7 @@ shareCorrections=false` 代入，得到：
 
 客户端用 `McVersions.toCubiomes(worldgenVersion)` 把下发串映射到 cubiomes 的
 `MCVersion` 常量；映射为空即视为不支持的版本。本插件下发的是**服务端 MC 版本串**，
-实测值 `"26.2"` 恰好命中白名单（→ `MCVersion 31`，即 "Chaos Cubed" 世界生成族）。
+取值 `"26.2"` 命中白名单（→ `MCVersion 31`，即 "Chaos Cubed" 世界生成族）。
 白名单覆盖 1.7 至 26.2 的每个真实发布串，且对更新的补丁版按 minor 线回退到该线最新常量
 （`NEWEST_BY_LINE`），因此**服务端升级补丁版不会让预测失效**，最坏情况是用旧参数预测。
 注意 26.1 与 26.2 是**不同的** cubiomes 常量（30 vs 31）：26.2 新增了 Chaos Cubed 族，
