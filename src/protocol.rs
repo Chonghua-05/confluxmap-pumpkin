@@ -633,7 +633,10 @@ mod tests {
 
         // A structurally valid offer that simply does not include capability 7.
         let narrow = parse_offer("pred|caps2:AgEBAQEB");
-        assert!(narrow.caps2, "envelope version 2 is enough to make it an offer");
+        assert!(
+            narrow.caps2,
+            "envelope version 2 is enough to make it an offer"
+        );
         assert!(!narrow.server_instance);
 
         // A different envelope version is not something we can read.
@@ -653,7 +656,10 @@ mod tests {
     #[test]
     fn the_selection_frame_matches_the_reference_shape() {
         let frame = build_map_capabilities("0.1.1", &[(CAP_SERVER_INSTANCE, 1)]);
-        assert_eq!(crate::state::hex(&frame), "12020005302e312e310000020202010701");
+        assert_eq!(
+            crate::state::hex(&frame),
+            "12020005302e312e310000020202010701"
+        );
         assert_eq!(frame[0], MSG_MAP_CAPABILITIES_S2C);
     }
 
@@ -680,7 +686,10 @@ mod tests {
 
     #[test]
     fn base64_url_decoding_rejects_foreign_characters() {
-        assert_eq!(base64_url_decode("AgMDAgEIAQECAQMBBAEFAQYBBwEIAQ").map(|b| b.len()), Some(22));
+        assert_eq!(
+            base64_url_decode("AgMDAgEIAQECAQMBBAEFAQYBBwEIAQ").map(|b| b.len()),
+            Some(22)
+        );
         assert!(base64_url_decode("AgMDAgEIAQECAQMBBAEFAQYBBwEIAQ=").is_some());
         assert_eq!(base64_url_decode("!!!!"), None);
         assert_eq!(base64_url_decode(""), Some(Vec::new()));

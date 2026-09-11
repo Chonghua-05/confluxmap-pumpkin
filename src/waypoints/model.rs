@@ -58,18 +58,14 @@ impl LocationKey {
 impl From<&crate::waypoints::proto::Waypoint> for LocationKey {
     fn from(waypoint: &crate::waypoints::proto::Waypoint) -> Self {
         // A stored waypoint came through `validate`, so the floor is total here.
-        LocationKey::of(
-            &waypoint.dimension_id,
-            waypoint.x,
-            waypoint.y,
-            waypoint.z,
+        LocationKey::of(&waypoint.dimension_id, waypoint.x, waypoint.y, waypoint.z).unwrap_or(
+            LocationKey {
+                dimension_id: waypoint.dimension_id.clone(),
+                block_x: 0,
+                block_y: 0,
+                block_z: 0,
+            },
         )
-        .unwrap_or(LocationKey {
-            dimension_id: waypoint.dimension_id.clone(),
-            block_x: 0,
-            block_y: 0,
-            block_z: 0,
-        })
     }
 }
 
@@ -226,7 +222,9 @@ fn valid_dimension_id(value: &str) -> bool {
         return false;
     }
     match value.split_once(':') {
-        Some((namespace, path)) => valid_resource_part(namespace, false) && valid_resource_part(path, true),
+        Some((namespace, path)) => {
+            valid_resource_part(namespace, false) && valid_resource_part(path, true)
+        }
         // The client's own parser defaults a bare id into the `minecraft`
         // namespace, so one is acceptable here too.
         None => valid_resource_part(value, true),
@@ -373,7 +371,10 @@ mod tests {
     fn a_colour_must_be_opaque() {
         let mut input = draft();
         input.color = 0x0034_98db;
-        assert!(validate(&input).is_none(), "translucent markers are refused");
+        assert!(
+            validate(&input).is_none(),
+            "translucent markers are refused"
+        );
         input.color = 0xffff_ffffu32 as i32;
         assert!(validate(&input).is_some());
     }
@@ -391,7 +392,14 @@ mod tests {
             input.dimension_id = good.to_string();
             assert!(validate(&input).is_some(), "{good} should be accepted");
         }
-        for bad in ["", "Minecraft:overworld", "minecraft:Overworld", "minecraft:the nether", ":x", "x:"] {
+        for bad in [
+            "",
+            "Minecraft:overworld",
+            "minecraft:Overworld",
+            "minecraft:the nether",
+            ":x",
+            "x:",
+        ] {
             input.dimension_id = bad.to_string();
             assert!(validate(&input).is_none(), "{bad} should be rejected");
         }
@@ -404,7 +412,10 @@ mod tests {
         assert_eq!(here, near, "both points occupy block 12, 64, -8");
         assert_eq!((here.block_x, here.block_y, here.block_z), (12, 64, -8));
         let elsewhere = LocationKey::of("minecraft:the_nether", 12.9, 64.0, -7.25).expect("finite");
-        assert_ne!(here, elsewhere, "the same block in another dimension is free");
+        assert_ne!(
+            here, elsewhere,
+            "the same block in another dimension is free"
+        );
         assert!(LocationKey::of("minecraft:overworld", f64::NAN, 0.0, 0.0).is_none());
         assert!(LocationKey::of("minecraft:overworld", f64::INFINITY, 0.0, 0.0).is_none());
     }

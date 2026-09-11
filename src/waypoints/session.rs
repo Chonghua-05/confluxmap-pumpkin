@@ -81,7 +81,9 @@ impl TokenBucket {
     pub fn try_consume(&mut self, now_ms: i64) -> bool {
         if now_ms > self.last_ms {
             let elapsed = (now_ms - self.last_ms) as f64;
-            self.tokens = self.capacity.min(self.tokens + elapsed * self.refill_per_ms);
+            self.tokens = self
+                .capacity
+                .min(self.tokens + elapsed * self.refill_per_ms);
             self.last_ms = now_ms;
         }
         if self.tokens < 1.0 {
@@ -113,11 +115,7 @@ impl Session {
             operator: false,
             malformed_strikes: 0,
             muted: false,
-            control: TokenBucket::new(
-                CONTROL_REQUEST_BURST,
-                CONTROL_REQUESTS_PER_MINUTE,
-                now_ms,
-            ),
+            control: TokenBucket::new(CONTROL_REQUEST_BURST, CONTROL_REQUESTS_PER_MINUTE, now_ms),
         }
     }
 
@@ -350,16 +348,25 @@ mod tests {
     #[test]
     fn a_hello_negotiates_the_lower_minor() {
         let mut sessions = Sessions::new();
-        assert_eq!(sessions.hello(Id { high: 1, low: 2 }, 1, 3, true, 0), Some(3));
+        assert_eq!(
+            sessions.hello(Id { high: 1, low: 2 }, 1, 3, true, 0),
+            Some(3)
+        );
         let session = sessions.get(Id { high: 1, low: 2 }).expect("exists");
         assert!(session.is_compatible());
         assert!(session.is_operator());
         assert!(!session.is_subscribed(), "a hello clears any subscription");
 
         // A client ahead of this build is capped, not rejected.
-        assert_eq!(sessions.hello(Id { high: 3, low: 4 }, 1, 99, false, 0), Some(3));
+        assert_eq!(
+            sessions.hello(Id { high: 3, low: 4 }, 1, 99, false, 0),
+            Some(3)
+        );
         // A negative minor is the pre-negotiation shape.
-        assert_eq!(sessions.hello(Id { high: 5, low: 6 }, 1, -1, false, 0), Some(0));
+        assert_eq!(
+            sessions.hello(Id { high: 5, low: 6 }, 1, -1, false, 0),
+            Some(0)
+        );
     }
 
     #[test]
@@ -370,7 +377,9 @@ mod tests {
             Some(0),
             "a foreign major still gets a status saying so"
         );
-        let session = sessions.get_mut(Id { high: 1, low: 2 }).expect("a session is still tracked");
+        let session = sessions
+            .get_mut(Id { high: 1, low: 2 })
+            .expect("a session is still tracked");
         assert!(!session.is_compatible());
         assert!(!session.is_subscribed());
         // ... and it cannot subscribe its way in.
@@ -409,7 +418,10 @@ mod tests {
         let mut answered = 0;
         // At the same instant the bucket is the burst and nothing more.
         for _ in 0..20 {
-            if sessions.hello(Id { high: 1, low: 2 }, 1, 3, false, 1_000).is_some() {
+            if sessions
+                .hello(Id { high: 1, low: 2 }, 1, 3, false, 1_000)
+                .is_some()
+            {
                 answered += 1;
             }
         }
@@ -419,9 +431,16 @@ mod tests {
     #[test]
     fn subscriptions_are_per_connection_and_clearable() {
         let mut sessions = Sessions::new();
-        sessions.hello(Id { high: 1, low: 2 }, 1, 3, false, 0).expect("hello");
-        sessions.hello(Id { high: 3, low: 4 }, 1, 3, false, 0).expect("hello");
-        sessions.get_mut(Id { high: 1, low: 2 }).expect("exists").subscribed = true;
+        sessions
+            .hello(Id { high: 1, low: 2 }, 1, 3, false, 0)
+            .expect("hello");
+        sessions
+            .hello(Id { high: 3, low: 4 }, 1, 3, false, 0)
+            .expect("hello");
+        sessions
+            .get_mut(Id { high: 1, low: 2 })
+            .expect("exists")
+            .subscribed = true;
         assert_eq!(sessions.subscribed(), vec![Id { high: 1, low: 2 }]);
         assert_eq!(sessions.compatible().len(), 2);
 
@@ -437,18 +456,42 @@ mod tests {
     #[test]
     fn an_operator_change_is_reported_once() {
         let mut sessions = Sessions::new();
-        sessions.hello(Id { high: 1, low: 2 }, 1, 3, false, 0).expect("hello");
-        assert!(sessions.refresh_operator(Id { high: 1, low: 2 }, true), "gained op");
-        assert!(!sessions.refresh_operator(Id { high: 1, low: 2 }, true), "no change");
-        assert!(sessions.refresh_operator(Id { high: 1, low: 2 }, false), "lost op");
-        assert!(!sessions.refresh_operator(Id { high: 9, low: 9 }, true), "unknown peer");
+        sessions
+            .hello(Id { high: 1, low: 2 }, 1, 3, false, 0)
+            .expect("hello");
+        assert!(
+            sessions.refresh_operator(Id { high: 1, low: 2 }, true),
+            "gained op"
+        );
+        assert!(
+            !sessions.refresh_operator(Id { high: 1, low: 2 }, true),
+            "no change"
+        );
+        assert!(
+            sessions.refresh_operator(Id { high: 1, low: 2 }, false),
+            "lost op"
+        );
+        assert!(
+            !sessions.refresh_operator(Id { high: 9, low: 9 }, true),
+            "unknown peer"
+        );
     }
 
     #[test]
     fn the_session_cap_refuses_new_keys_instead_of_growing() {
         let mut sessions = Sessions::new();
         for index in 0..MAX_TRACKED_SESSIONS {
-            assert!(sessions.ensure(Id { high: 0, low: index as u64 }, 0).is_some());
+            assert!(
+                sessions
+                    .ensure(
+                        Id {
+                            high: 0,
+                            low: index as u64
+                        },
+                        0
+                    )
+                    .is_some()
+            );
         }
         assert!(
             sessions.ensure(Id { high: 1, low: 1 }, 0).is_none(),

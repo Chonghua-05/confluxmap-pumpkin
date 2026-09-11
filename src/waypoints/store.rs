@@ -211,9 +211,7 @@ impl Store {
     /// The point occupying this block, if one does.
     pub fn find_at(&self, location: &LocationKey) -> Option<&Waypoint> {
         let id = self.occupancy.get(location)?;
-        self.waypoints
-            .iter()
-            .find(|waypoint| waypoint.id == *id)
+        self.waypoints.iter().find(|waypoint| waypoint.id == *id)
     }
 
     /// How many points this player has published.
@@ -267,10 +265,7 @@ impl Store {
 
     /// Prepares a replacement.
     pub fn prepare_update(&self, waypoint: Waypoint) -> Result<Prepared, StoreError> {
-        let position = *self
-            .index
-            .get(&waypoint.id)
-            .ok_or(StoreError::Missing)?;
+        let position = *self.index.get(&waypoint.id).ok_or(StoreError::Missing)?;
         let next = self.next_revision()?;
         if waypoint.revision != next {
             return Err(StoreError::Malformed);
@@ -447,12 +442,11 @@ mod tests {
         store
             .commit(store.prepare_create(waypoint(1, 1, 12.5)).expect("fits"))
             .expect("commit");
-        let prepared = store.prepare_delete(Id { high: 0, low: 1 }).expect("exists");
+        let prepared = store
+            .prepare_delete(Id { high: 0, low: 1 })
+            .expect("exists");
         assert_eq!(prepared.delta().kind, DeltaKind::Remove);
-        assert_eq!(
-            prepared.delta().removed_id.map(|id| id.low),
-            Some(1)
-        );
+        assert_eq!(prepared.delta().removed_id.map(|id| id.low), Some(1));
         store.commit(prepared).expect("commit");
         assert_eq!(store.revision(), 2);
         assert_eq!(store.len(), 0);
@@ -494,8 +488,18 @@ mod tests {
         let store = Store::new(snapshot).expect("consistent snapshot");
         assert_eq!(store.revision(), 5);
         assert_eq!(store.len(), 2);
-        assert_eq!(store.count_published_by(Id { high: 0, low: 0xaaaa }), 2);
-        assert!(store.find_at(&LocationKey::of("minecraft:overworld", 12.9, 64.0, 0.0).expect("finite")).is_some());
+        assert_eq!(
+            store.count_published_by(Id {
+                high: 0,
+                low: 0xaaaa
+            }),
+            2
+        );
+        assert!(
+            store
+                .find_at(&LocationKey::of("minecraft:overworld", 12.9, 64.0, 0.0).expect("finite"))
+                .is_some()
+        );
     }
 
     #[test]

@@ -248,7 +248,10 @@ impl CommandHandler for WaypointsClearHandler {
         let mut out = String::from("== confluxmap waypoints clear ==\n");
         match crate::waypoints::clear() {
             Ok(removed) => {
-                let _ = writeln!(out, "removed {removed} waypoint(s); the directory is now empty.");
+                let _ = writeln!(
+                    out,
+                    "removed {removed} waypoint(s); the directory is now empty."
+                );
             }
             // A persistence failure is not a usage error, so it is reported in
             // the text and still exits `Ok(0)`: the operator needs the reason,

@@ -83,7 +83,10 @@ pub fn build_reply(
         } else {
             Vec::new()
         };
-        frames.push(protocol::build_map_capabilities(plugin_version, &capabilities));
+        frames.push(protocol::build_map_capabilities(
+            plugin_version,
+            &capabilities,
+        ));
         if offer.server_instance {
             frames.push(protocol::build_server_instance(instance_id));
         }
@@ -155,10 +158,7 @@ pub fn handle_payload(
     }
 
     let bytes: usize = reply.frames.iter().map(Vec::len).sum();
-    let sent = reply
-        .frames
-        .iter()
-        .all(|frame| send(player, frame));
+    let sent = reply.frames.iter().all(|frame| send(player, frame));
 
     let summary = summarise(player, &hello, &reply, &config, server_version, index, sent);
 
@@ -166,10 +166,7 @@ pub fn handle_payload(
         state::count_policy_sent();
         info!("[confluxmap] {summary}");
         state::remember_handshake(summary.clone());
-        Outcome::Replied {
-            summary,
-            bytes,
-        }
+        Outcome::Replied { summary, bytes }
     } else {
         state::count_send_failure();
         warn!("[confluxmap] {summary}");
@@ -370,6 +367,10 @@ mod tests {
                 protocol::MSG_HELLO_POLICY_S2C,
             ]
         );
-        assert_eq!(*reply.frames[0].last().expect("non-empty"), 0, "no capabilities");
+        assert_eq!(
+            *reply.frames[0].last().expect("non-empty"),
+            0,
+            "no capabilities"
+        );
     }
 }
