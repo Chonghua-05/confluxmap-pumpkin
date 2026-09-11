@@ -1,0 +1,28 @@
+[package]
+name = "confluxmap-pumpkin"
+version = "0.1.0"
+edition = "2024"
+description = "ConfluxMap companion for the Pumpkin Minecraft server: hands confluxmap clients the world seed and worldgen version so they can render the predicted map."
+license = "LGPL-3.0-or-later"
+repository = "https://github.com/Chonghua-05/confluxmap-pumpkin"
+readme = "README.md"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pinned to the API build the host ships: the plugin links against the host's WIT
+# ABI, so a change in the API crate can change the generated bindings and break
+# loading. Note that cargo *ignores* semver build metadata in a requirement, so
+# the `+26.2-26.45` suffix is documentation rather than a constraint -- the
+# requirement is effectively `=0.1.0-dev`, and Cargo.lock (committed) is what
+# actually pins the resolved build. Keep both in step when the server is bumped.
+pumpkin-plugin-api = "=0.1.0-dev+26.2-26.45"
+tracing = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+strip = true
+panic = "abort"

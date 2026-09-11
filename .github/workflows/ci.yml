@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `.cargo/config.toml` pins the build target to wasm32-wasip2. The protocol
+      # and config modules are pure Rust with no host calls and the API crate's
+      # generated bindings compile for native targets too, so the tests run on the
+      # host -- an explicit --target overrides the config.
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --locked --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
+
+      - name: unit tests
+        run: cargo test --locked --target x86_64-unknown-linux-gnu
+
+      # The seed injector edits a user's pumpkin.toml, so it gets its own
+      # regression suite: the failure that matters there is a silent rewrite of
+      # an unrelated table, not a crash.
+      - name: tools regression tests
+        run: python3 tools/test_inject_seed.py
+
+  build-wasm:
+    name: build wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --locked --release --target wasm32-wasip2
+
+      - name: report artifact
+        run: ls -la target/wasm32-wasip2/release/*.wasm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: confluxmap_pumpkin-wasm
+          path: target/wasm32-wasip2/release/confluxmap_pumpkin.wasm
+          if-no-files-found: error

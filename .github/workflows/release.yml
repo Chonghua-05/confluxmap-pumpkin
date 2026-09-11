@@ -1,0 +1,60 @@
+name: Release
+
+# Publishing is tag-driven: pushing a `v*` tag only produces a release once the
+# tag agrees with the crate version and the test suite passes, so a release can
+# never point at bytes that were not verified.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build + publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: tag matches the crate version
+        run: |
+          crate_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$crate_version" != "$tag_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate_version"
+            exit 1
+          fi
+          echo "releasing v$crate_version"
+
+      - name: unit tests
+        run: cargo test --locked --target x86_64-unknown-linux-gnu
+
+      - name: build
+        run: cargo build --locked --release --target wasm32-wasip2
+
+      - name: package
+        run: |
+          mkdir -p dist
+          cp target/wasm32-wasip2/release/confluxmap_pumpkin.wasm dist/
+          sha256sum dist/confluxmap_pumpkin.wasm \
+            | sed 's#dist/##' > dist/confluxmap_pumpkin.wasm.sha256
+          cat dist/confluxmap_pumpkin.wasm.sha256
+
+      - name: publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/confluxmap_pumpkin.wasm
+            dist/confluxmap_pumpkin.wasm.sha256
+          generate_release_notes: true

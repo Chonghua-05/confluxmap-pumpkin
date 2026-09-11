@@ -1,0 +1,13 @@
+# Normalise everything to LF. This project is built and deployed on Linux
+# (wasm32-wasip2 + a Linux VM), and a CRLF checkout breaks the shebang in
+# build.sh / deploy.sh / test.sh with "bad interpreter: /bin/bash^M".
+* text=auto eol=lf
+
+# Windows-only launcher, if one is ever added, is the sole exception.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binaries must never be line-ending-translated.
+*.wasm binary
+*.jar  binary
+*.png  binary
