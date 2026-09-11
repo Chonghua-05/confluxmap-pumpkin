@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Run the unit tests.
 #
-# The crate is a wasm cdylib, but the protocol and config modules are pure Rust
-# with no host calls, and the API crate's generated bindings compile for native
-# targets too. That means the tests run on the host - including the byte-for-byte
-# comparison against the vector the reference Java encoder produced.
+# The crate is a wasm cdylib, but the protocol and config modules call nothing on
+# the plugin API - the config tests exercise the parser directly rather than the
+# file - and the API crate's generated bindings compile for native targets too.
+# That means the tests run on the host, including the byte-for-byte comparison
+# against the vector the reference Java encoder produced.
 #
 # This script re-creates the MSVC environment for the same reason build.sh does.
 set -euo pipefail

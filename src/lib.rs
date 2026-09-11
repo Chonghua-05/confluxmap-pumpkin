@@ -9,7 +9,10 @@
 //! grants the seed and declares corrections disabled. The client then renders the
 //! predicted underlay locally and never asks for authoritative patches - which is
 //! what makes this plugin small enough to survive Pumpkin's API churn: it touches
-//! only plugin messaging, one event, and a version string.
+//! only plugin messaging, one event, a version string, and its own config file.
+//!
+//! The seed cannot be discovered (see [`config`]), so it is read from the
+//! plugin's data folder; that is the one directory the WASI sandbox opens.
 //!
 //! Because only a client with confluxmap installed registers that channel and
 //! sends a HELLO, the "modded clients only" requirement needs no player filtering.
@@ -38,10 +41,7 @@ use pumpkin_plugin_api::{
 };
 use tracing::{debug, info, warn};
 
-use crate::config::{Config, ENV_SEED};
-
-/// How the plugin identifies itself to the server.
-const PLUGIN_NAME: &str = "confluxmap-pumpkin";
+use crate::config::PLUGIN_NAME;
 
 /// Declares the companion channel to a client **before** it runs its own join
 /// callback.
@@ -216,12 +216,18 @@ impl Plugin for ConfluxMapPlugin {
                           can render the predicted map. Corrections stay disabled."
                 .into(),
             dependencies: vec![],
-            permissions: env_permissions(),
+            permissions: vec![
+                permissions::FS_READ_DATA.into(),
+                permissions::FS_WRITE_DATA.into(),
+            ],
         }
     }
 
     fn on_load(&self, context: Context) -> Result<()> {
-        let config = Config::from_env();
+        let data_folder = context.get_data_folder();
+        state::set_data_folder(data_folder.clone());
+        let loaded = config::load(&data_folder);
+        let config = loaded.config;
 
         info!("=================================================");
         info!(
@@ -230,6 +236,9 @@ impl Plugin for ConfluxMapPlugin {
             env!("CARGO_PKG_VERSION")
         );
         info!("[confluxmap] channel = {}", protocol::CHANNEL_ID);
+        for note in &loaded.warnings {
+            warn!("[confluxmap] {note}");
+        }
         match config.seed {
             Some(seed) => info!(
                 "[confluxmap] seed = {seed}; world_id = {}; worldgen override = {:?}",
@@ -237,8 +246,9 @@ impl Plugin for ConfluxMapPlugin {
                 config.worldgen_override
             ),
             None => warn!(
-                "[confluxmap] {ENV_SEED} is not set, so clients will be told seedGranted=0. \
-                 Set it under [plugins.overrides.{PLUGIN_NAME}.environment] in pumpkin.toml."
+                "[confluxmap] no seed configured, so clients will be told seedGranted=0. \
+                 Fill in `seed` in {}, then run `/cfm reload`.",
+                config::operator_path()
             ),
         }
         state::set_config(config);
@@ -278,18 +288,9 @@ impl Plugin for ConfluxMapPlugin {
     }
 }
 
-/// Requests read access to just the `CFM_*` variables, not `sys.env` wholesale.
-fn env_permissions() -> Vec<String> {
-    [
-        config::ENV_SEED,
-        config::ENV_WORLDGEN,
-        config::ENV_WORLD_ID,
-        config::ENV_SHARE_SEED,
-        config::ENV_DIMS,
-    ]
-    .into_iter()
-    .map(|key| format!("{}{key}", permissions::SYS_ENV_PREFIX))
-    .collect()
-}
-
+// Requests access to the plugin's own data folder, where `config.toml` lives.
+//
+// The pair is deliberate: read is what the plugin needs on every start, write is
+// what lets it drop the annotated template the first time. No other permission is
+// requested - not the environment, not the network.
 register_plugin!(ConfluxMapPlugin);

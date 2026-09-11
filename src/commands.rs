@@ -1,10 +1,10 @@
 //! The `/cfm` command tree: operator-facing introspection.
 //!
-//! All four subcommands are read-mostly. `/cfm reload` re-reads the process
-//! environment, which is worth having but rarely changes anything: the host
-//! injects `CFM_*` once, at server start, so editing them in `pumpkin.toml`
-//! normally requires a restart. The command reports that rather than pretending
-//! otherwise.
+//! All four subcommands are read-mostly. `/cfm reload` re-reads `config.toml`,
+//! which is the point of keeping the configuration in a file: an edit takes
+//! effect without a restart. Clients already in the world keep the policy they
+//! were sent, since a confluxmap client handshakes once per session; players who
+//! join after the reload get the new one.
 
 use std::fmt::Write as _;
 
@@ -15,7 +15,7 @@ use pumpkin_plugin_api::{
     text::TextComponent,
 };
 
-use crate::config::Config;
+use crate::config;
 use crate::state;
 
 /// `/cfm status` - configuration, counters and the running server version.
@@ -63,7 +63,7 @@ impl CommandHandler for SeedHandler {
         let mut out = String::from("== confluxmap seed ==\n");
         match config.seed {
             Some(seed) => {
-                let _ = writeln!(out, "CFM_SEED        = {seed}");
+                let _ = writeln!(out, "seed            = {seed}");
                 let _ = writeln!(out, "world_id        = {}", config.world_id());
                 let _ = writeln!(
                     out,
@@ -73,14 +73,14 @@ impl CommandHandler for SeedHandler {
                 if config.grants_seed() {
                     out.push_str("clients receive = seedGranted=1, correctionsEnabled=0\n");
                 } else {
-                    out.push_str("clients receive = seedGranted=0 (CFM_SHARE_SEED is false)\n");
+                    out.push_str("clients receive = seedGranted=0 (share_seed = false)\n");
                 }
             }
             None => {
                 let _ = writeln!(
                     out,
-                    "CFM_SEED is unset. Set it in [plugins.overrides.confluxmap-pumpkin.environment] \
-                     in pumpkin.toml, then restart the server."
+                    "no seed configured. Fill in `seed` in {}, then run `/cfm reload`.",
+                    config::operator_path()
                 );
             }
         }
@@ -145,7 +145,7 @@ impl CommandHandler for HelloHandler {
     }
 }
 
-/// `/cfm reload` - re-read the environment and reinstall the configuration.
+/// `/cfm reload` - re-read `config.toml` and reinstall the configuration.
 pub struct ReloadHandler;
 
 impl CommandHandler for ReloadHandler {
@@ -156,12 +156,21 @@ impl CommandHandler for ReloadHandler {
         _args: ConsumedArgs,
     ) -> Result<i32, CommandError> {
         let previous = state::config_snapshot();
-        let next = Config::from_env();
         let server_version = state::server_version(&server);
 
         let mut out = String::from("== confluxmap reload ==\n");
+        let Some(folder) = state::data_folder() else {
+            out.push_str("the plugin has not been loaded yet; nothing to reload\n");
+            return reply(&sender, out);
+        };
+
+        let loaded = config::load(folder);
+        let next = loaded.config;
+        for note in &loaded.warnings {
+            let _ = writeln!(out, "warning: {note}");
+        }
         if next == previous {
-            out.push_str("no change (the environment is fixed at server start)\n");
+            out.push_str("no change\n");
         } else {
             out.push_str("configuration changed:\n");
             let _ = writeln!(
@@ -176,6 +185,7 @@ impl CommandHandler for ReloadHandler {
             );
         }
         state::set_config(next);
+        out.push_str("players already in the world keep the policy they were sent.\n");
         reply(&sender, out)
     }
 }

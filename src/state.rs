@@ -22,6 +22,23 @@ const CHANNEL_CAPACITY: usize = 32;
 
 static CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
 
+/// The sandbox-visible path of the plugin's data folder, kept so `/cfm reload`
+/// can re-read `config.toml` without being handed a [`Context`](pumpkin_plugin_api::Context).
+static DATA_FOLDER: OnceLock<String> = OnceLock::new();
+
+/// Remembers the data folder the host reported at load time.
+pub fn set_data_folder(path: String) {
+    // A second `on_load` without an intervening unload cannot happen, and losing
+    // this race would only mean reload keeps using the first path, which is the
+    // same one.
+    let _ = DATA_FOLDER.set(path);
+}
+
+/// The data folder, once the plugin has been loaded.
+pub fn data_folder() -> Option<&'static str> {
+    DATA_FOLDER.get().map(String::as_str)
+}
+
 static HELLOS_SEEN: AtomicU64 = AtomicU64::new(0);
 static POLICIES_SENT: AtomicU64 = AtomicU64::new(0);
 static SEND_FAILURES: AtomicU64 = AtomicU64::new(0);

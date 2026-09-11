@@ -1,41 +1,77 @@
-//! Runtime configuration, sourced from the plugin's WASI environment.
+//! Runtime configuration: the plugin's own file, in its own data folder.
 //!
-//! Pumpkin's plugin API exposes no world-seed accessor, and the WASI sandbox
-//! denies reads of `pumpkin.toml` and the world save. The seed therefore has to
-//! be handed in from outside the sandbox through
-//! `[plugins.overrides.<name>.environment]` in `pumpkin.toml`:
+//! Pumpkin gives a plugin no way to read the world seed. The plugin API has no
+//! seed accessor, and the WASI sandbox preopens exactly one directory - the
+//! plugin's private data folder - so neither `pumpkin.toml` nor the world save
+//! is reachable. The seed has to be written down instead, and this module owns
+//! that file:
 //!
-//! ```toml
-//! [plugins.overrides.confluxmap-pumpkin.environment]
-//! CFM_SEED = "<the server's own seed>"
+//! ```text
+//! plugins/data/confluxmap-pumpkin/config.toml
 //! ```
 //!
-//! Everything except the seed is optional and has a working default, so a
-//! server that only sets `CFM_SEED` still gets a complete handshake.
+//! The first load writes an annotated template when the file is absent; the
+//! operator then uncomments `seed` and fills it in. `/cfm reload` reads the file
+//! again, so an edit needs no restart.
+//!
+//! Parsing is lenient on purpose, and dependency-free: one `key = value` per
+//! line, `#` comments, values bare or quoted, lists as either a TOML array or a
+//! comma-separated string. A bad value warns and leaves that one setting at its
+//! default - the plugin must still answer the handshake (with `seedGranted = 0`)
+//! rather than refuse to load over a typo.
 
 use std::fmt::Write as _;
+use std::fs;
+use std::io::ErrorKind;
 
 use crate::protocol::{Budgets, Dim};
 
-/// The world seed. Required for the plugin to do anything useful.
-pub const ENV_SEED: &str = "CFM_SEED";
-/// Overrides the worldgen version advertised to clients.
+/// The plugin's name. Pumpkin derives the data folder from the plugin metadata,
+/// so the paths below are built from this one constant.
+pub const PLUGIN_NAME: &str = "confluxmap-pumpkin";
+
+/// The configuration file, relative to the plugin's data folder.
+pub const CONFIG_FILE: &str = "config.toml";
+
+/// The annotated file written when no configuration exists yet.
 ///
-/// Normally this is *derived* from the running server's own version string, so
-/// the override exists only for unusual setups (a fork whose version string
-/// does not encode the Minecraft version).
-pub const ENV_WORLDGEN: &str = "CFM_WORLDGEN";
-/// Overrides the client-side cache namespace.
-pub const ENV_WORLD_ID: &str = "CFM_WORLD_ID";
-/// Set to `false` to advertise a policy without granting the seed.
-pub const ENV_SHARE_SEED: &str = "CFM_SHARE_SEED";
-/// Comma-separated dimension ids to advertise, e.g.
-/// `minecraft:overworld,minecraft:the_nether`.
-pub const ENV_DIMS: &str = "CFM_DIMS";
+/// Every key is commented out, so a freshly written file means "all defaults" -
+/// which is also what [`parse`] must make of it. The test suite asserts that.
+pub const TEMPLATE: &str = "\
+# confluxmap-pumpkin configuration.
+#
+# Pumpkin offers a plugin no way to read the world seed: the plugin API has no
+# seed accessor, and this folder is the only directory the plugin can open. The
+# seed therefore has to be written here, and it must match `seed` in pumpkin.toml
+# - clients predict terrain from it, so a wrong value renders a wrong map.
+#
+# Run `/cfm reload` after editing, or restart the server.
+
+# The world seed. Uncomment and fill in. While the line stays commented out the
+# plugin answers with seedGranted=0 and clients render no map. Accepts a signed
+# decimal integer, or an unsigned one for a seed Minecraft displays above
+# 9223372036854775807.
+# seed = 0
+
+# Set to false to answer handshakes without granting the seed. Clients then
+# render no map. Default: true.
+# share_seed = true
+
+# The worldgen version sent to clients, e.g. \"1.21.4\". Leave unset to use the
+# Minecraft version of the running server.
+# worldgen = \"\"
+
+# The client-side cache namespace. Leave unset to derive it from the seed.
+# world_id = \"\"
+
+# Dimensions to advertise, comma separated, e.g.
+# \"minecraft:overworld,minecraft:the_nether\". Default: minecraft:overworld.
+# dims = \"minecraft:overworld\"
+";
 
 /// Minecraft version baked into the `pumpkin-plugin-api` build this plugin was
 /// compiled against. Used only when the running server's version string cannot
-/// be parsed, and as the cross-check baseline for [`Config::worldgen_override`].
+/// be parsed.
 pub const FALLBACK_MC_VERSION: &str = "26.2";
 
 /// The vanilla dimensions whose generator cubiomes can model.
@@ -59,13 +95,13 @@ pub struct DimSpec {
 /// Resolved plugin configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
-    /// The world seed, or `None` when `CFM_SEED` is absent or unparseable.
+    /// The world seed, or `None` when the file has no parseable `seed`.
     pub seed: Option<i64>,
-    /// Whether the seed may be granted to clients at all (`CFM_SHARE_SEED`).
+    /// Whether the seed may be granted to clients at all (`share_seed`).
     pub share_seed: bool,
-    /// Explicit `CFM_WORLDGEN`, when set.
+    /// Explicit `worldgen`, when set.
     pub worldgen_override: Option<String>,
-    /// Explicit `CFM_WORLD_ID`, when set.
+    /// Explicit `world_id`, when set.
     pub world_id_override: Option<String>,
     /// Dimensions to advertise.
     pub dims: Vec<DimSpec>,
@@ -86,25 +122,62 @@ impl Default for Config {
     }
 }
 
-impl Config {
-    /// Reads the configuration from the process environment.
-    ///
-    /// A missing `CFM_SEED` is not an error here; the caller decides how loud to
-    /// be about it (the plugin still answers the handshake so the client is told
-    /// "no seed" explicitly rather than being left waiting).
-    pub fn from_env() -> Self {
-        Config {
-            seed: env_var(ENV_SEED).as_deref().and_then(parse_seed),
-            share_seed: env_var(ENV_SHARE_SEED).as_deref().is_none_or(parse_bool),
-            worldgen_override: env_var(ENV_WORLDGEN).filter(|s| !s.is_empty()),
-            world_id_override: env_var(ENV_WORLD_ID).filter(|s| !s.is_empty()),
-            dims: env_var(ENV_DIMS)
-                .as_deref()
-                .map_or_else(default_dims, parse_dims),
-            budgets: Budgets::default(),
-        }
-    }
+/// The configuration read from disk, plus anything worth telling the operator.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Loaded {
+    /// The resolved configuration. Always usable: failures leave defaults.
+    pub config: Config,
+    /// Problems to log: a file that could not be created or read, a value that
+    /// did not parse, a key that is not recognised.
+    pub warnings: Vec<String>,
+}
 
+/// Reads the configuration from the plugin's data folder.
+///
+/// `data_folder` is the sandbox-visible path the host reports (currently
+/// `data`). A missing file is not an error: the template is written in its
+/// place, and the caller is told about it through [`Loaded::warnings`].
+pub fn load(data_folder: &str) -> Loaded {
+    let path = format!("{data_folder}/{CONFIG_FILE}");
+    let mut warnings = Vec::new();
+
+    let source = match fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            match fs::write(&path, TEMPLATE) {
+                Ok(()) => warnings.push(format!(
+                    "wrote a new configuration to {} - uncomment `seed` and fill it in",
+                    operator_path()
+                )),
+                Err(error) => warnings.push(format!(
+                    "could not write {}: {error}; running on defaults",
+                    operator_path()
+                )),
+            }
+            TEMPLATE.to_string()
+        }
+        Err(error) => {
+            warnings.push(format!(
+                "could not read {}: {error}; running on defaults",
+                operator_path()
+            ));
+            String::new()
+        }
+    };
+
+    let config = parse(&source, &mut warnings);
+    Loaded { config, warnings }
+}
+
+/// Where the operator finds this file, relative to the server root.
+///
+/// For log and command text only. Inside the sandbox the same file is reached as
+/// `<data folder>/config.toml`.
+pub fn operator_path() -> String {
+    format!("plugins/data/{PLUGIN_NAME}/{CONFIG_FILE}")
+}
+
+impl Config {
     /// Whether the seed will actually be granted in the policy.
     pub fn grants_seed(&self) -> bool {
         self.share_seed && self.seed.is_some()
@@ -139,7 +212,7 @@ impl Config {
     /// Resolves the worldgen version handed to the client.
     ///
     /// Order of precedence:
-    /// 1. `CFM_WORLDGEN`, for setups where the server version string is unusable.
+    /// 1. `worldgen`, for setups where the server version string is unusable.
     /// 2. The Minecraft version parsed out of the running server's own
     ///    `pumpkin-version` (e.g. `0.1.0-dev+26.2-26.45` -> `26.2`).
     /// 3. [`FALLBACK_MC_VERSION`], the version this plugin was built against.
@@ -209,7 +282,7 @@ impl Config {
 
     fn worldgen_source(&self, server_version: Option<&str>) -> &'static str {
         if self.worldgen_override.is_some() {
-            "CFM_WORLDGEN override"
+            "worldgen override"
         } else if server_version.and_then(parse_mc_version).is_some() {
             "derived from server version"
         } else {
@@ -218,25 +291,113 @@ impl Config {
     }
 }
 
-/// Default dimension set: the overworld alone.
-fn default_dims() -> Vec<DimSpec> {
-    vec![spec_for("minecraft:overworld")]
+/// Parses the file body, appending anything wrong with it to `warnings`.
+fn parse(source: &str, warnings: &mut Vec<String>) -> Config {
+    let mut config = Config::default();
+    let mut unknown: Vec<String> = Vec::new();
+
+    for (index, raw) in source.lines().enumerate() {
+        let line = strip_comment(raw).trim();
+        // Blank lines and table headers are not this plugin's business: the file
+        // is flat, but an operator pasting a sectioned fragment should not get a
+        // warning for it.
+        if line.is_empty() || line.starts_with('[') {
+            continue;
+        }
+        let number = index + 1;
+
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            warnings.push(format!("line {number}: not a `key = value` pair: {line}"));
+            continue;
+        };
+        let key = unquote(raw_key.trim());
+        let value = unquote(raw_value.trim());
+
+        match key.as_str() {
+            "seed" => match parse_seed(&value) {
+                Some(seed) => config.seed = Some(seed),
+                None => warnings.push(format!(
+                    "line {number}: `seed = {value}` is not an integer; leaving the seed unset"
+                )),
+            },
+            "share_seed" => match parse_bool(&value) {
+                Some(share) => config.share_seed = share,
+                None => warnings.push(format!(
+                    "line {number}: `share_seed = {value}` is not a boolean; keeping {}",
+                    config.share_seed
+                )),
+            },
+            "worldgen" => config.worldgen_override = non_empty(value),
+            "world_id" => config.world_id_override = non_empty(value),
+            "dims" => config.dims = parse_dims(&value),
+            _ => unknown.push(key),
+        }
+    }
+
+    if !unknown.is_empty() {
+        warnings.push(format!(
+            "ignoring unrecognised {}: {}",
+            if unknown.len() == 1 { "key" } else { "keys" },
+            unknown.join(", ")
+        ));
+    }
+    config
 }
 
-/// Parses `CFM_DIMS`: comma-separated dimension ids. Blank entries are ignored;
-/// an empty result falls back to the default so the policy is never dim-less.
+/// Cuts a `#` comment, but not one inside a quoted value.
+fn strip_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    for (index, ch) in line.char_indices() {
+        match ch {
+            '"' | '\'' if quote == Some(ch) => quote = None,
+            '"' | '\'' if quote.is_none() => quote = Some(ch),
+            '#' if quote.is_none() => return &line[..index],
+            _ => {}
+        }
+    }
+    line
+}
+
+/// Removes one layer of matching quotes, if present.
+fn unquote(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[bytes.len() - 1] == bytes[0]
+    {
+        return raw[1..raw.len() - 1].to_string();
+    }
+    raw.to_string()
+}
+
+/// Splits a list value: either a TOML array (`["a", "b"]`) or a plain
+/// comma-separated string. Blank entries are dropped.
+fn list_values(raw: &str) -> Vec<String> {
+    let body = raw
+        .trim()
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(raw.trim());
+    body.split(',')
+        .map(|item| unquote(item.trim()))
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+/// Parses `dims`. An empty result falls back to the default, so the policy is
+/// never dim-less.
 fn parse_dims(raw: &str) -> Vec<DimSpec> {
-    let specs: Vec<DimSpec> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(spec_for)
-        .collect();
+    let specs: Vec<DimSpec> = list_values(raw).iter().map(|id| spec_for(id)).collect();
     if specs.is_empty() {
         default_dims()
     } else {
         specs
     }
+}
+
+/// Default dimension set: the overworld alone.
+fn default_dims() -> Vec<DimSpec> {
+    vec![spec_for("minecraft:overworld")]
 }
 
 /// Infers the dimension type from its id, defaulting `predictable` accordingly.
@@ -281,15 +442,11 @@ fn parse_mc_version(pumpkin_version: &str) -> Option<String> {
     }
 }
 
-/// Reads an environment variable, treating blank as absent.
-fn env_var(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
-}
-
 /// Parses a seed, accepting both signed decimal and a raw `u64` bit pattern (so
 /// a seed above `i64::MAX` can be written the way Minecraft displays it).
+/// Underscores are accepted as digit separators.
 fn parse_seed(raw: &str) -> Option<i64> {
-    let trimmed = raw.trim();
+    let trimmed = raw.trim().replace('_', "");
     if let Ok(v) = trimmed.parse::<i64>() {
         return Some(v);
     }
@@ -297,16 +454,109 @@ fn parse_seed(raw: &str) -> Option<i64> {
 }
 
 /// Parses a boolean flag: `1/true/yes/on` and `0/false/no/off`.
-fn parse_bool(raw: &str) -> bool {
-    !matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "0" | "false" | "no" | "off"
-    )
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// `Some` unless the value is blank, which is how an empty override is written.
+fn non_empty(value: String) -> Option<String> {
+    if value.is_empty() { None } else { Some(value) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_quiet(source: &str) -> Config {
+        let mut warnings = Vec::new();
+        parse(source, &mut warnings)
+    }
+
+    fn warnings_for(source: &str) -> Vec<String> {
+        let mut warnings = Vec::new();
+        parse(source, &mut warnings);
+        warnings
+    }
+
+    /// The file the plugin writes must mean "all defaults" when re-read, or a
+    /// fresh install would start from something other than the documented state.
+    #[test]
+    fn the_template_parses_to_the_defaults() {
+        let config = parse_quiet(TEMPLATE);
+        assert_eq!(config, Config::default());
+        assert_eq!(config.seed, None);
+        assert!(!config.grants_seed());
+    }
+
+    #[test]
+    fn parses_a_filled_in_file() {
+        let config = parse_quiet(
+            r#"
+            # a comment
+            seed = 12345
+            share_seed = false
+            worldgen = "1.21.4"
+            world_id = "my-namespace"
+            dims = "minecraft:overworld,minecraft:the_nether"
+            "#,
+        );
+        assert_eq!(config.seed, Some(12345));
+        assert!(!config.share_seed);
+        assert_eq!(config.worldgen_override.as_deref(), Some("1.21.4"));
+        assert_eq!(config.world_id_override.as_deref(), Some("my-namespace"));
+        assert_eq!(config.dims.len(), 2);
+        assert_eq!(config.dims[1].kind, "the_nether");
+    }
+
+    #[test]
+    fn accepts_toml_arrays_for_dims() {
+        let config = parse_quiet(r#"dims = ["minecraft:overworld", "minecraft:the_end"]"#);
+        assert_eq!(config.dims.len(), 2);
+        assert_eq!(config.dims[1].id, "minecraft:the_end");
+        assert!(config.dims[1].predictable);
+    }
+
+    #[test]
+    fn ignores_comments_blank_lines_and_table_headers() {
+        let config = parse_quiet(
+            "\n# seed = 1\n[plugins]\nseed = 7  # trailing comment\nworld_id = \"a#b\"\n",
+        );
+        assert_eq!(config.seed, Some(7));
+        // A `#` inside quotes is part of the value, not a comment.
+        assert_eq!(config.world_id_override.as_deref(), Some("a#b"));
+    }
+
+    #[test]
+    fn a_bad_value_warns_and_keeps_the_default() {
+        let warnings = warnings_for("seed = soon\nshare_seed = maybe\n");
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("`seed = soon`"), "{warnings:?}");
+        assert!(warnings[1].contains("`share_seed = maybe`"), "{warnings:?}");
+        let config = parse_quiet("seed = soon\nshare_seed = maybe\n");
+        assert_eq!(config.seed, None);
+        assert!(config.share_seed);
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_once() {
+        let warnings = warnings_for("seed = 1\nwdogen = \"26.2\"\ndimz = \"x\"\n");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("wdogen, dimz"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_line_without_a_value_is_reported() {
+        let warnings = warnings_for("seed\n");
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("not a `key = value` pair"),
+            "{warnings:?}"
+        );
+    }
 
     #[test]
     fn parses_the_pumpkin_version_format() {
@@ -332,6 +582,10 @@ mod tests {
     fn accepts_signed_and_unsigned_seed_forms() {
         assert_eq!(parse_seed("123"), Some(123));
         assert_eq!(parse_seed(" -7 "), Some(-7));
+        assert_eq!(
+            parse_seed("1_789_288_297_874_145_099"),
+            Some(1_789_288_297_874_145_099)
+        );
         assert_eq!(parse_seed("18446744073709551615"), Some(-1));
         assert_eq!(parse_seed("not-a-number"), None);
     }

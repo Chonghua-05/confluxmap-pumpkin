@@ -77,13 +77,13 @@ pub fn handle_payload(player: &Player, data: &[u8], server_version: Option<&str>
     if !config.grants_seed() {
         warn!(
             "[confluxmap] no seed to grant ({}); replying with seedGranted=0 so the client is \
-             not left waiting. Set {} in [plugins.overrides.confluxmap-pumpkin.environment].",
+             not left waiting. Fill in `seed` in {} and run `/cfm reload`.",
             if config.seed.is_none() {
-                "CFM_SEED is unset or unparseable"
+                "`seed` is unset or unparseable"
             } else {
-                "share_seed=false"
+                "share_seed = false"
             },
-            crate::config::ENV_SEED
+            crate::config::operator_path()
         );
     }
 
