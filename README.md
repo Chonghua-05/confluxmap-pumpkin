@@ -2,26 +2,66 @@
 
 [![CI](https://github.com/Chonghua-05/confluxmap-pumpkin/actions/workflows/ci.yml/badge.svg)](https://github.com/Chonghua-05/confluxmap-pumpkin/actions/workflows/ci.yml)
 
-confluxmap 的 [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin)（南瓜端）服务端插件。
+[confluxmap](https://github.com/Chonghua-05/conflux-map) 客户端在
+[Pumpkin](https://github.com/Pumpkin-MC/Pumpkin)（南瓜端）上的服务端伴侣插件。
 
-玩家进世界后，confluxmap 客户端会在 `confluxmap:map_sync` 通道上发送 `HELLO`（携带自己的
-mod 版本）。本插件收到 HELLO 后回一个 `HELLO_POLICY` 帧告知：服务器种子
-（`seedGranted=1`）、worldgen 版本、世界 ID、维度列表，同时 `correctionsEnabled=0` ——
-客户端进入 `SERVER_DISABLED` 模式：会话保持活跃、用拿到的种子在本地生成预测地图，
-但**不请求纠错**。
+## 上游项目
 
-也就是说，这是个**最小可行版本：只发种子和版本，不做纠错**。它解决的是"多人服务器上
-客户端拿不到种子，预测地图没法用"这件事，而不是复刻完整的 Paper 伙伴（那套含权威补丁、
-区块轮询、内嵌 Web 地图后端）。
+| 项目 | 是什么 | 与本插件的关系 |
+|---|---|---|
+| **confluxmap** | 一个 Minecraft 客户端 mod + Paper 服务端伴侣。它用**世界种子**在本地预测地形，再向服务端请求"权威补丁"来校正预测与真实世界的偏差。 | 客户端侧的协议实现者。本插件响应的是它发出的握手。 |
+| **Pumpkin** | 用 Rust 写的 Minecraft 服务端，插件以 **WASM**（`wasm32-wasip2`）形态加载，通过 WIT 接口与宿主通信，运行在能力式沙箱里。 | 本插件的运行宿主。 |
 
-## 为什么这个形态是安全的
+## 目前只支持了什么
 
-- **天然门控**：只有装了 confluxmap 的客户端才会注册该通道并发 HELLO，所以"种子/版本
-  只发给装了 mod 的玩家"是事件模型自带的，无需额外判断。
-- **不依赖易变 API**：只用 `PlayerCustomPayloadEvent` 与 `player.send_custom_payload`
-  这两个最基础的插件面；不做区块轮询、不做纠错，Pumpkin 未来 API 变动的影响面最小。
-- **协议零加密**：confluxmap 全协议层无加密（仅 SHA-256 标识哈希 + Deflater 压缩），
-  服务端实现不需要任何密码学。
+**只有一件事：握手——把世界种子和 worldgen 版本发给客户端。**
+
+装了 confluxmap 的玩家进世界后，会在 `confluxmap:map_sync` 通道上发一个 `HELLO`。
+本插件回一个 `HELLO_POLICY` 帧，里面是：
+
+- 服务器**世界种子**（`seedGranted=1`）
+- **worldgen 版本**串（客户端用它选 cubiomes 的生成参数）
+- 世界 ID、维度列表
+- `correctionsEnabled=0` —— 明确告诉客户端"我不提供纠错"
+
+客户端拿到种子后进入 `SERVER_DISABLED` 模式：预测地图照常生成并使用，但**从不**向
+服务端请求权威补丁。一轮握手即完成，没有后续往来。
+
+**没有**纠错、没有区块扫描、没有权威地图、没有内嵌 Web 地图后端。
+
+### 为什么只支持这些：Pumpkin 的限制
+
+confluxmap 的完整形态是"预测 → 校正"，而这条链在 Pumpkin 上**每个环节都被堵住**，
+这些是实测确认的硬边界，不是没做：
+
+| 缺失的能力 | Pumpkin 的限制 | 卡住什么 |
+|---|---|---|
+| 世界种子 | 插件 API **没有种子访问器**；WASI 沙箱又读不到 `pumpkin.toml` 与 `world/` | 连种子都拿不到 → 只能由管理员从外部注入（见下节） |
+| 世界存档 | 沙箱只映射插件自己的数据目录；相对上溯、绝对路径、目录枚举、符号链接逃逸**全部 ENOENT** | 无法读 region 文件生成权威地图 |
+| 非驻留区块 | 区块 API 只能看到"因玩家出现而驻留"的区块；读非驻留区块返回默认空值，且不会触发加载 | 无法回读存档做校正 |
+| 区块生命周期事件 | `ChunkLoadEvent` / `ChunkUnloadEvent` 等**实测从不触发** | 无法事件驱动地扫描区块 |
+
+所以"用种子生成预测地图"这一步还能做（种子注入后即可），而"用存档生成权威地图并下发
+补丁"这一步在 WASM 插件里无从下手。本插件取前者，把后者明确关掉。
+
+另外，插件消息（custom payload）本身是 **Java 版专属**：Bedrock 客户端没有这条通道，
+所以本插件对 Bedrock 客户端不产生任何效果。
+
+## 适用的 Pumpkin 版本
+
+| 项 | 值 |
+|---|---|
+| 锁定的插件 API | `pumpkin-plugin-api = 0.1.0-dev+26.2-26.45` |
+| 对应服务端 | Pumpkin `0.1.0-dev+26.2-26.45` |
+| 对应 Minecraft | 26.2（Java 协议 776） |
+| 运行形态 | `wasm32-wasip2` 插件，丢进 `plugins/` 目录即加载，无需改服务端、无需重编译服务端 |
+
+⚠️ **API 版本号与服务端 build 是一一对应的**，不是语义化兼容：Pumpkin 的开发版 API
+直接绑定服务端的 WIT ABI，服务端升级后必须同步改这个锁并重新编译，否则插件加载失败。
+（`Cargo.lock` 里也锁了具体 build，两者要一起改。）
+
+客户端侧没有这个约束：Pumpkin **不做跨版本门禁**，实测 1.17.1（协议 755）客户端也能
+连上 26.2 服务端并完成握手。
 
 ## 安装
 
@@ -33,7 +73,7 @@ mod 版本）。本插件收到 HELLO 后回一个 `HELLO_POLICY` 帧告知：�
 
 > **首次加载会被问权限**：插件未签名，Pumpkin 默认
 > （`ask_permission_confirmation = true`）会**在 stdin 上交互式询问**是否授予权限。
-> 没有 TTY 的部署方式来会卡在这里，生产环境请先在终端确认一次。
+> 没有 TTY 的部署方式会卡在这里，生产环境请先在终端确认一次。
 
 ### 种子从哪来
 
@@ -51,59 +91,8 @@ CFM_SEED = "<与服务器顶层 seed 一致>"
 python tools/inject_seed.py /path/to/pumpkin.toml
 ```
 
-`CFM_WORLDGEN` 默认不写：插件从运行中服务端的 `pumpkin-version` 字符串自动解析 MC 版本
-（如 `0.1.0-dev+26.2-26.45` → `26.2`），服务器升级后不会过期。
-
-## 关键实现细节：必须主动向客户端声明通道
-
-**这是最容易漏掉、且漏掉后完全看不出来的一步。**
-
-confluxmap 客户端在发 HELLO 之前会检查服务端是否**已经向它声明过** `confluxmap:map_sync`
-（`ClientPlayNetworking.canSend` → `ClientPacketListener.hasChannel`）。没声明就不发，
-而且失败只记在客户端 **debug 级**日志里 —— 服务端侧看起来一切正常，没有任何错误。
-
-在 Paper 上这一步是 Bukkit 替插件做的（注册插件通道时自动下发）。Pumpkin 没有对应 API，
-所以插件自己发原版包：`minecraft:register`，载荷是 NUL 分隔的通道名。
-
-时序同样关键：客户端在**自己的 JOIN 回调**里发 HELLO，所以声明必须比它更早。本插件挂在
-`PlayerLoginEvent`（实测在登录包之前触发）上，`PlayerJoinEvent` 作为第二次尝试，客户端
-注册通道时再补一次（**每会话最多一次** —— 一次进服会注册几十个装载器通道，不设上限就会
-变成几十个冗余包和几十行日志）。
-
-```
-22:25:44 [confluxmap] announced confluxmap:map_sync to TestClient at login
-22:25:44 [confluxmap] re-announced confluxmap:map_sync to TestClient at join
-22:25:44 [confluxmap] HELLO #1 TestClient modVersion="0.2.0" -> HELLO_POLICY sent 97B ...
-```
-
-### 各加载器的注册行为
-
-客户端**是否**回发旧式 `minecraft:register` 取决于装载器，`/cfm status` 里的
-`channels registered` 计数**不能**当作"成功了没有"的判据：
-
-| 客户端 | 旧式 `minecraft:register` | 结论 |
-|---|---|---|
-| Fabric（1.17.1 / 26.2） | **会发**（含 `confluxmap:map_sync`） | 计数 +1，日志有 `confluxmap client detected` |
-| NeoForge 26.1 | **不发**（走 payload 类型注册） | 计数不变，**但 HELLO 照常到达** |
-
-唯一的权威判据是 **`handshakes`**（HELLO 计数）以及客户端的 `mapSyncMode=SERVER_DISABLED`。
-
-⚠️ **测试注意**：手工发包的测试客户端如果直接发 HELLO（不检查声明），会**绕过**这道门
-而"测试通过"，掩盖真实客户端的问题。复现真实客户端的门控（在 play Login 包到达时检查
-服务端是否已声明通道，未声明就拒绝发送）之后，测试才有意义。
-
-## 已验证的客户端
-
-真机连接实测（服务端 `0.1.0-dev+26.2-26.45`，Protocol 776）：
-
-| 客户端 | mod 版本 | 结果 |
-|---|---|---|
-| NeoForge 26.1 | 0.1.4 | ✅ 收到 policy 97B |
-| Fabric 26.2 | 0.1.5-beta.1 | ✅ 收到 policy 97B |
-| Fabric 1.17.1 | 0.1.4 | ✅ 收到 policy 97B |
-
-三者拿到的都是同一帧 `seedGranted=true / correctionsEnabled=0 / worldgen="26.2"`，客户端
-落在 `SERVER_DISABLED`。**Pumpkin 不做跨版本门禁**，1.17.1 客户端也能连上并完成握手。
+`CFM_WORLDGEN` 默认不写：插件从运行中服务端的 `pumpkin-version` 字符串自动解析 MC
+版本（如 `0.1.0-dev+26.2-26.45` → `26.2`），服务器升级后不会过期。
 
 ## 构建与测试
 
@@ -114,12 +103,12 @@ confluxmap 客户端在发 HELLO 之前会检查服务端是否**已经向它声
 python3 tools/test_inject_seed.py   # 种子注入脚本的回归测试
 ```
 
-两者都是 Windows/Git Bash 下 re-create MSVC 环境的包装脚本：Git Bash 的 GNU coreutils
+前两者是 Windows/Git Bash 下 re-create MSVC 环境的包装脚本：Git Bash 的 GNU coreutils
 `link` 会抢在 MSVC `link.exe` 前面，导致 rustc 链接报 `link: extra operand`。Linux/macOS
 或 CI 上直接 `cargo build --release` / `cargo test` 即可。
 
-`test.sh` 用 `--target x86_64-pc-windows-msvc` 在**宿主**上跑测试：协议与配置模块是纯 Rust
-且无宿主调用，API crate 生成的绑定也能编到原生 target，所以测试不必进 wasm。
+`test.sh` 用 `--target x86_64-pc-windows-msvc` 在**宿主**上跑测试：协议与配置模块是纯
+Rust 且无宿主调用，API crate 生成的绑定也能编到原生 target，所以测试不必进 wasm。
 
 ## 运维命令
 
