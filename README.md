@@ -58,11 +58,6 @@ confluxmap 的完整形态是"预测 → 校正"。该链条在 Pumpkin 上无�
 
 1. 取得 `confluxmap_pumpkin.wasm`：从
    [Releases](https://github.com/Chonghua-05/confluxmap-pumpkin/releases) 下载，或按下一节自行构建。
-   发布页另附 `confluxmap_pumpkin.wasm.sha256`，用于校验下载是否完整：
-
-   ```bash
-   sha256sum -c confluxmap_pumpkin.wasm.sha256
-   ```
 
 2. 将该文件放入服务端运行目录下的 `plugins/`。
 

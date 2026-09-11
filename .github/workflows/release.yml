@@ -47,14 +47,10 @@ jobs:
         run: |
           mkdir -p dist
           cp target/wasm32-wasip2/release/confluxmap_pumpkin.wasm dist/
-          sha256sum dist/confluxmap_pumpkin.wasm \
-            | sed 's#dist/##' > dist/confluxmap_pumpkin.wasm.sha256
-          cat dist/confluxmap_pumpkin.wasm.sha256
+          ls -l dist/
 
       - name: publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/confluxmap_pumpkin.wasm
-            dist/confluxmap_pumpkin.wasm.sha256
+          files: dist/confluxmap_pumpkin.wasm
           generate_release_notes: true
