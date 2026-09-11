@@ -184,8 +184,37 @@ shareCorrections=false` 代入，得到：
 > 经参考编码器产出的就是这一帧。**期望字节仍源自 Java 实现，不是 Rust 实现的自我
 > 循环验证。**
 
-## 保留消息码
+## 主通道消息清单
 
-`Proto` 中还定义了后续纠错路要用的消息（`MAP_VIEW_REQ` / `MAP_PATCH` /
-`CORRECTION_*` 等）。本插件**不实现也不发送**它们；`flags` 里对应位恒 0，
-客户端不会进入相关流程。
+`Proto` 定义的 `confluxmap:map_sync` 消息码全表，以及本插件的处理方式：
+
+| 码 | 方向 | 消息 | 本插件 |
+|---|---|---|---|
+| `0x01` | C2S | `HELLO` | 解析并应答 |
+| `0x02` | S2C | `HELLO_POLICY` | 发送 |
+| `0x03` | C2S | `MAP_VIEW_REQ` | 忽略 |
+| `0x04` | S2C | `MAP_PATCH` | 不发送 |
+| `0x05` | S2C | `POLICY_UPDATE` | 不发送 |
+| `0x06` | S2C | `ERROR` | 不发送 |
+| `0x07` | S2C | `FLAT_BASELINE` | 不发送 |
+| `0x08` | C2S | `LOAD_STATE_SUBSCRIBE` | 忽略 |
+| `0x09` | S2C | `LOAD_STATE_DELTA` | 不发送 |
+| `0x0A` | C2S | `MAP_SYNC_SUBSCRIBE` | 忽略 |
+| `0x0B` | S2C | `MAP_INVALIDATE` | 不发送 |
+| `0x0C` | C2S | `MAP_REGION_VIEW_REQ` | 忽略 |
+| `0x0D` | S2C | `MAP_REGION_PATCH` | 不发送 |
+| `0x0E` | C2S | `MAP_REGION_SYNC_SUBSCRIBE` | 忽略 |
+| `0x0F` | S2C | `MAP_REGION_INVALIDATE` | 不发送 |
+| `0x10` | S2C | `MAP_COMPATIBILITY` | 不发送 |
+| `0x11` | S2C | `SERVER_VIEW_DISTANCE` | 不发送 |
+| `0x12` | S2C | `MAP_CAPABILITIES` | 不发送 |
+| `0x13` | S2C | `SERVER_INSTANCE` | 不发送 |
+| `0x14` | S2C | `PLAYER_POSITIONS` | 不发送 |
+
+「忽略」表示该码到达同一通道但并非 `HELLO`：插件记录一条日志后不作处理。各 S2C 帧
+之所以一律不发，是因为策略里对应的开关与能力位全部为 0（如 `correctionsEnabled = 0`），
+客户端不会进入相关流程。哪些帧将来能发、哪些根本发不了，见
+[pumpkin-capabilities.md](pumpkin-capabilities.md)。
+
+共享航点在另一个通道 `confluxmap:waypoints_v1` 上（`SharedWaypointProto`，v1.3，
+消息码 `0x01`–`0x0B`）。本插件不实现也不发送该通道的任何消息。

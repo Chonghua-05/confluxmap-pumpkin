@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/Chonghua-05/confluxmap-pumpkin/actions/workflows/ci.yml/badge.svg)](https://github.com/Chonghua-05/confluxmap-pumpkin/actions/workflows/ci.yml)
 
+简体中文 | [English](README.en.md)
+
 [confluxmap](https://github.com/Chonghua-05/conflux-map) 在
 [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin) 服务端上的伴侣插件。
 
@@ -14,30 +16,56 @@
 
 ## 功能支持
 
-| 能力 | 状态 | 说明 |
-|---|---|---|
-| 握手应答 | 已支持 | 在 `confluxmap:map_sync` 上收到 `HELLO` 后应答一帧 `HELLO_POLICY`；握手在单次往返内完成，其后不再有往来消息 |
-| 世界种子 | 已支持 | 置 `seedGranted = 1`，逐维度附带种子 |
-| worldgen 版本 | 已支持 | 客户端据此选择地形生成参数 |
-| 世界 ID | 已支持 | 客户端用作地图缓存的命名空间 |
-| 维度列表 | 已支持 | 逐维度给出可预测性与生成器 preset；默认仅 `minecraft:overworld` |
-| 权威地图纠错 | 未支持 | `correctionsEnabled = 0`，客户端据此进入 `SERVER_DISABLED`：会话保持 ACTIVE、种子可用，但不请求权威补丁 |
-| 区块加载状态 | 未支持 | 对应标志未下发 |
+本插件实现 confluxmap 在 Pumpkin 上的最小可用形态：**只下发种子**，由客户端在本地生成
+预测地图，权威纠错保持关闭。下表按「是否做得出来」分三档；判定方法与逐条证据（含
+Pumpkin 源码位置）见 [docs/pumpkin-capabilities.md](docs/pumpkin-capabilities.md)。
+
+### 已支持
+
+| 能力 | 说明 |
+|---|---|
+| 通道声明 | 登录时以 `minecraft:register` 向客户端宣告 `confluxmap:map_sync`。Paper 由服务端代发，Pumpkin 无此 API，不宣告则客户端不会发起握手 |
+| 握手应答 | 收到 `HELLO` 后应答一帧 `HELLO_POLICY`；握手在单次往返内完成，其后不再有往来消息 |
+| 世界种子 | 置 `seedGranted = 1`，逐维度附带种子 |
+| worldgen 版本 | 客户端据此选择地形生成参数 |
+| 世界 ID | 客户端用作地图缓存的命名空间 |
+| 维度列表 | 逐维度给出可预测性与生成器 preset；默认仅 `minecraft:overworld` |
+| 限流预算声明 | 策略中携带 `Budgets` 字段。本插件不应答任何请求，该字段仅用于满足客户端解析不得退化的要求 |
+| 种子共享开关 | 置 `share_seed = false` 时改发 `seedGranted = 0` |
+| 关闭权威纠错 | `correctionsEnabled = 0`，客户端据此进入 `SERVER_DISABLED`：会话保持 ACTIVE、种子可用，但不请求权威补丁 |
+| 载荷校验 | 严格解码：类型字节、UTF-8 长度上限、整帧必须恰好消费完 |
+| 运维命令 | `/cfm status`、`/cfm seed`、`/cfm hello`、`/cfm reload` |
+
+### 未支持：宿主能力具备，本插件尚未实现
+
+这些在 Pumpkin 上做得出来，只是不在最小形态的范围内。
+
+| 能力 | 说明 |
+|---|---|
+| 公共路径点 | 上游的 `confluxmap:waypoints_v1` 通道：创建、修改、删除、订阅与广播。所需能力（自定义载荷双向、在线玩家枚举、进退事件、op 查询、私有目录持久化、命令注册）均已具备 |
+| 玩家位置广播 | 实体雷达所需的在线玩家位置流，依赖每 tick 任务与玩家位置读取 |
+| 视距下发 | `SERVER_VIEW_DISTANCE` |
+| 服务端实例 ID | `SERVER_INSTANCE`，需在私有目录持久化一个 UUID |
+| 策略热更 | `POLICY_UPDATE`，在会话中途变更策略 |
+| 能力与兼容性协商 | `MAP_CAPABILITIES` / `MAP_COMPATIBILITY`。当前刻意不下发，以便客户端走 `SERVER_DISABLED` 兜底 |
+| 网页地图 | 上游是 HTTP + WebSocket 服务。Pumpkin 允许插件监听 TCP（WASI sockets，需申请 `network.tcp.bind`），但没有 HTTP 服务端接口，协议须自行实现；且上游瓦片来自读存档的纠错服务，此处只能退化为浏览器端按种子预测 |
+| 结构化错误 | `ERROR` 帧 |
+| 限流与防护 | 令牌桶、畸形包 strike 与静音、变更幂等缓存 |
+| 运维管理面 | 上游的 `enable` / `disable` / `performance` 等命令 |
+
+### 未支持：Pumpkin 侧无可行路径
+
+confluxmap 的完整形态是「预测 → 校正」。校正这一半在 Pumpkin 上无法成立：
+
+| 能力 | 缺失之处 |
+|---|---|
+| 权威地图纠错 | `MAP_PATCH` / `MAP_REGION_PATCH`。插件读不到世界存档的 region 文件，也拿不到未加载区块，无法生成权威地图 |
+| 纠错失效广播 | 缺少覆盖全部变更来源的区块脏标记事件；区块放置与破坏事件只覆盖玩家行为 |
+| 区块加载状态 | 插件接口无法枚举已加载区块；区块加载与卸载事件在服务端无派发点 |
+| 超平坦基线 | 读不到世界生成器 preset |
+| 种子自动获取 | 插件接口未提供种子访问器，沙箱只开放插件私有目录（见「配置文件」） |
 
 `biomeMapForbidden`、`structureSearchForbidden`、`entityRadarForbidden` 三个限制标志本插件一律不下发，客户端维持其默认行为。
-
-### 未支持部分的原因
-
-confluxmap 的完整形态是"预测 → 校正"。该链条在 Pumpkin 上无法成立，原因均在 Pumpkin 侧：
-
-| 所需能力 | Pumpkin 侧现状 |
-|---|---|
-| 世界种子 | 插件接口未提供种子访问器；插件运行于 WASI 沙箱，只能访问自身的私有数据目录，读不到 `pumpkin.toml` 与世界存档。种子因此需人工写入插件配置文件（见「配置文件」） |
-| 世界存档 | 同上：插件文件系统不包含世界存档，无法读取 region 文件以生成权威地图 |
-| 非驻留区块 | 区块读取接口只在已加载的区块中查找，未命中即返回空值，且不会触发区块加载 |
-| 区块生命周期事件 | 插件接口声明了区块加载 / 卸载事件，但服务端当前版本没有在区块生命周期上派发它们的调用点 |
-
-因此，本插件实现"以种子生成预测地图"所需的握手；"以存档生成权威地图并下发补丁"在插件接口内没有可行路径，故不予实现，并在策略中明确关闭。
 
 插件消息通道仅存在于 Java 版。Bedrock 客户端不会发起握手，本插件亦不向其发送数据。
 
@@ -130,6 +158,7 @@ src/commands.rs  /cfm 命令树
 src/state.rs     配置快照、计数器与通道声明的去重
 src/lib.rs       Plugin 入口与事件注册
 docs/protocol.md             HELLO / HELLO_POLICY 线格式与客户端判定链路
+docs/pumpkin-capabilities.md Pumpkin 宿主能力核查与逐项功能可行性
 tools/PolicyVector.java      以参考 Java 编码器生成黄金向量
 tools/inject_seed.py         由 pumpkin.toml 幂等写入插件配置
 tools/test_inject_seed.py    种子写入脚本的回归测试
