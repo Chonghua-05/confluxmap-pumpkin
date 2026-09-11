@@ -348,7 +348,8 @@ impl Outbound {
 
 /// A payload that violated the wire contract.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DecodeError(pub String);/// A message that cannot be represented in the negotiated wire shape.
+pub struct DecodeError(pub String);
+/// A message that cannot be represented in the negotiated wire shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncodeError(pub String);
 
@@ -404,9 +405,13 @@ pub fn decode(payload: &[u8], negotiated_minor: i32) -> Result<Inbound, DecodeEr
         },
         MSG_SUBSCRIBE => Inbound::Subscribe,
         MSG_CREATE => Inbound::Create(CreateRequest {
-            operation_id: r.uuid().ok_or_else(|| decode_error("truncated operationId"))?,
+            operation_id: r
+                .uuid()
+                .ok_or_else(|| decode_error("truncated operationId"))?,
             expected_revision: r.i64().ok_or_else(|| decode_error("truncated revision"))?,
-            name: r.utf(MAX_UTF8_BYTES).ok_or_else(|| decode_error("invalid name"))?,
+            name: r
+                .utf(MAX_UTF8_BYTES)
+                .ok_or_else(|| decode_error("invalid name"))?,
             dimension_id: r
                 .utf(MAX_UTF8_BYTES)
                 .ok_or_else(|| decode_error("invalid dimensionId"))?,
@@ -419,10 +424,14 @@ pub fn decode(payload: &[u8], negotiated_minor: i32) -> Result<Inbound, DecodeEr
             marker_label: marker_utf(&mut r, negotiated_minor, "markerLabel")?,
         }),
         MSG_UPDATE => Inbound::Update(UpdateRequest {
-            operation_id: r.uuid().ok_or_else(|| decode_error("truncated operationId"))?,
+            operation_id: r
+                .uuid()
+                .ok_or_else(|| decode_error("truncated operationId"))?,
             id: r.uuid().ok_or_else(|| decode_error("truncated id"))?,
             expected_revision: r.i64().ok_or_else(|| decode_error("truncated revision"))?,
-            name: r.utf(MAX_UTF8_BYTES).ok_or_else(|| decode_error("invalid name"))?,
+            name: r
+                .utf(MAX_UTF8_BYTES)
+                .ok_or_else(|| decode_error("invalid name"))?,
             dimension_id: r
                 .utf(MAX_UTF8_BYTES)
                 .ok_or_else(|| decode_error("invalid dimensionId"))?,
@@ -435,19 +444,27 @@ pub fn decode(payload: &[u8], negotiated_minor: i32) -> Result<Inbound, DecodeEr
             marker_label: marker_utf(&mut r, negotiated_minor, "markerLabel")?,
         }),
         MSG_DELETE => Inbound::Delete(DeleteRequest {
-            operation_id: r.uuid().ok_or_else(|| decode_error("truncated operationId"))?,
+            operation_id: r
+                .uuid()
+                .ok_or_else(|| decode_error("truncated operationId"))?,
             id: r.uuid().ok_or_else(|| decode_error("truncated id"))?,
             expected_revision: r.i64().ok_or_else(|| decode_error("truncated revision"))?,
         }),
         MSG_LOCK => Inbound::Lock(LockRequest {
-            operation_id: r.uuid().ok_or_else(|| decode_error("truncated operationId"))?,
+            operation_id: r
+                .uuid()
+                .ok_or_else(|| decode_error("truncated operationId"))?,
             id: r.uuid().ok_or_else(|| decode_error("truncated id"))?,
             expected_revision: r.i64().ok_or_else(|| decode_error("truncated revision"))?,
             locked: r
                 .bool()
                 .ok_or_else(|| decode_error("locked must be encoded as 0 or 1"))?,
         }),
-        other => return Err(decode_error(format!("unhandled message type 0x{other:02x}"))),
+        other => {
+            return Err(decode_error(format!(
+                "unhandled message type 0x{other:02x}"
+            )));
+        }
     };
 
     if r.remaining() != 0 {
@@ -550,11 +567,7 @@ fn put_waypoint(
     put_utf(out, &waypoint.publisher_name, "publisherName")?;
     put_utf(out, &waypoint.name, "name")?;
     put_utf(out, &waypoint.dimension_id, "dimensionId")?;
-    for (value, field) in [
-        (waypoint.x, "x"),
-        (waypoint.y, "y"),
-        (waypoint.z, "z"),
-    ] {
+    for (value, field) in [(waypoint.x, "x"), (waypoint.y, "y"), (waypoint.z, "z")] {
         if !value.is_finite() {
             return Err(EncodeError(format!("{field} coordinate must be finite")));
         }
@@ -575,8 +588,12 @@ fn put_waypoint(
 }
 
 fn put_utf(out: &mut Vec<u8>, value: &str, field: &str) -> Result<(), EncodeError> {
-    wire::utf(out, value, MAX_UTF8_BYTES)
-        .map_err(|long| EncodeError(format!("{field} is {} bytes, over {MAX_UTF8_BYTES}", long.len)))
+    wire::utf(out, value, MAX_UTF8_BYTES).map_err(|long| {
+        EncodeError(format!(
+            "{field} is {} bytes, over {MAX_UTF8_BYTES}",
+            long.len
+        ))
+    })
 }
 
 fn finite(r: &mut Reader<'_>, field: &str) -> Result<f64, DecodeError> {
@@ -590,7 +607,9 @@ fn finite(r: &mut Reader<'_>, field: &str) -> Result<f64, DecodeError> {
 }
 
 fn kind(r: &mut Reader<'_>) -> Result<WaypointKind, DecodeError> {
-    let value = r.u8().ok_or_else(|| decode_error("truncated waypoint type"))?;
+    let value = r
+        .u8()
+        .ok_or_else(|| decode_error("truncated waypoint type"))?;
     WaypointKind::from_wire(value)
         .ok_or_else(|| decode_error(format!("unknown waypoint type id: {value}")))
 }
@@ -641,7 +660,7 @@ mod tests {
             kind: WaypointKind::Normal,
             icon_item_id: "minecraft:compass".to_string(),
             marker_label: "B".to_string(),
-            created_at_ms: 1_789_288_297_874,
+            created_at_ms: 1_712_345_678_901,
             revision: 3,
         }
     }
@@ -661,7 +680,10 @@ mod tests {
 
     #[test]
     fn subscribe_is_a_bare_type_byte() {
-        assert_eq!(decode(&[MSG_SUBSCRIBE], 3).expect("valid"), Inbound::Subscribe);
+        assert_eq!(
+            decode(&[MSG_SUBSCRIBE], 3).expect("valid"),
+            Inbound::Subscribe
+        );
         // ... and trailing bytes are a desynchronised peer, not a payload to guess at.
         assert!(decode(&[MSG_SUBSCRIBE, 0x00], 3).is_err());
     }
@@ -718,7 +740,10 @@ mod tests {
     #[test]
     fn rejects_messages_that_belong_to_the_other_direction() {
         let error = decode(&[MSG_STATUS], 3).expect_err("serverbound decode of S2C");
-        assert!(error.0.contains("not valid in the C2S direction"), "{error}");
+        assert!(
+            error.0.contains("not valid in the C2S direction"),
+            "{error}"
+        );
         // Unknown ids, oversized payloads and empty payloads are all malformed.
         assert!(decode(&[0x7f], 3).is_err());
         assert!(decode(&[], 3).is_err());
@@ -727,9 +752,15 @@ mod tests {
 
     #[test]
     fn rejects_non_finite_coordinates_and_unknown_types() {
-        assert!(decode(&create_payload(f64::NAN, 0), 2).is_err(), "NaN is not a coordinate");
+        assert!(
+            decode(&create_payload(f64::NAN, 0), 2).is_err(),
+            "NaN is not a coordinate"
+        );
         assert!(decode(&create_payload(f64::INFINITY, 0), 2).is_err());
-        assert!(decode(&create_payload(1.0, 9), 2).is_err(), "unknown waypoint type");
+        assert!(
+            decode(&create_payload(1.0, 9), 2).is_err(),
+            "unknown waypoint type"
+        );
         assert!(decode(&create_payload(1.0, 0), 2).is_ok());
     }
 
@@ -797,7 +828,11 @@ mod tests {
         // client reads its own gate out of this field.
         assert_eq!(at_one[5..9], [0, 0, 0, 1]);
         assert_eq!(at_two[5..9], [0, 0, 0, 2]);
-        assert_eq!(*at_one.last().expect("non-empty"), 0x40, "maxPlayer low byte");
+        assert_eq!(
+            *at_one.last().expect("non-empty"),
+            0x40,
+            "maxPlayer low byte"
+        );
         assert_eq!(*at_two.last().expect("non-empty"), 1, "owner policy");
     }
 
@@ -864,9 +899,13 @@ mod tests {
             + (2 + "Base".len())                     // name
             + (2 + "minecraft:overworld".len())      // dimensionId
             + 24 + 4 + 1                             // x, y, z, colour, kind
-            + 1 + 8 + 8;                             // legacy lock, createdAt, revision
+            + 1 + 8 + 8; // legacy lock, createdAt, revision
         let marker = (2 + "minecraft:compass".len()) + (2 + "B".len());
-        assert_eq!(at_two.len(), 12 + entry, "a minor-2 entry stops before the marker style");
+        assert_eq!(
+            at_two.len(),
+            12 + entry,
+            "a minor-2 entry stops before the marker style"
+        );
         assert_eq!(at_three.len(), 12 + entry + marker);
     }
 }

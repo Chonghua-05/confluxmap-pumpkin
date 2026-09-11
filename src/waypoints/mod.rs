@@ -34,8 +34,8 @@ pub use proto::CHANNEL_ID;
 use std::fmt::Write as _;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use pumpkin_plugin_api::{Player, Server};
 use crate::identity::Id;
+use pumpkin_plugin_api::{Player, Server};
 use tracing::{debug, info, warn};
 
 use crate::clock::now_ms;
@@ -104,10 +104,7 @@ static HUB: OnceLock<Mutex<Hub>> = OnceLock::new();
 /// server's uptime: the state behind the lock is plain data, and the worst a
 /// recovered lock can do is serve a catalog that was mid-update.
 fn lock() -> MutexGuard<'static, Hub> {
-    match HUB
-        .get_or_init(|| Mutex::new(Hub::unconfigured()))
-        .lock()
-    {
+    match HUB.get_or_init(|| Mutex::new(Hub::unconfigured())).lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
@@ -121,12 +118,16 @@ enum Action {
     /// them at.
     Reply { frames: Vec<Outbound>, minor: i32 },
     /// A `RESULT` for the author, a delta for every subscribed peer.
-    Mutation {
-        result: Outbound,
-        minor: i32,
-        broadcast: Option<Outbound>,
-        recipients: Vec<(Id, i32)>,
-    },
+    Mutation(Box<MutationFrames>),
+}
+
+/// The frames one committed mutation produces: the author's `RESULT` and, when
+/// the catalog moved, the delta for every subscribed peer.
+struct MutationFrames {
+    result: Outbound,
+    minor: i32,
+    broadcast: Option<Outbound>,
+    recipients: Vec<(Id, i32)>,
 }
 
 impl Hub {
@@ -192,7 +193,9 @@ impl Hub {
     }
 
     fn session_minor(&self, key: Id) -> i32 {
-        self.sessions.get(key).map_or(0, session::Session::effective_minor)
+        self.sessions
+            .get(key)
+            .map_or(0, session::Session::effective_minor)
     }
 
     fn session_compatible(&self, key: Id) -> bool {
@@ -398,7 +401,7 @@ impl Hub {
             }
             None => Vec::new(),
         };
-        Action::Mutation {
+        Action::Mutation(Box::new(MutationFrames {
             result: Outbound::Result {
                 operation_id: result.operation_id,
                 status: result.status_code(),
@@ -407,7 +410,7 @@ impl Hub {
             minor,
             broadcast,
             recipients,
-        }
+        }))
     }
 
     /// Records a malformed payload, muting a connection that keeps sending them.
@@ -501,11 +504,7 @@ impl Hub {
             "malformed      = {} dropped, {} muted",
             self.counters.malformed, self.counters.muted
         );
-        let _ = writeln!(
-            out,
-            "encode errors  = {}",
-            self.counters.encode_failures
-        );
+        let _ = writeln!(out, "encode errors  = {}", self.counters.encode_failures);
         out
     }
 
@@ -587,10 +586,9 @@ impl Hub {
         self.pending_deltas = removed
             .iter()
             .enumerate()
-            .map(|(index, id)| {
+            .filter_map(|(index, id)| {
                 delta_to_outbound(&Delta::remove(*id, snapshot.revision + 1 + index as i64))
             })
-            .flatten()
             .collect();
         Ok(removed.len())
     }
@@ -606,13 +604,10 @@ fn actor_of(peer: &Peer) -> Actor {
 
 fn delta_to_outbound(delta: &Delta) -> Option<Outbound> {
     match delta.kind {
-        DeltaKind::Upsert => delta
-            .waypoint
-            .clone()
-            .map(|waypoint| Outbound::Upsert {
-                revision: delta.revision,
-                waypoint,
-            }),
+        DeltaKind::Upsert => delta.waypoint.clone().map(|waypoint| Outbound::Upsert {
+            revision: delta.revision,
+            waypoint,
+        }),
         DeltaKind::Remove => delta.removed_id.map(|id| Outbound::Remove {
             revision: delta.revision,
             id,
@@ -690,7 +685,10 @@ pub fn configure(data_folder: &str, config: &Config, world_id: &str) -> Vec<Stri
     let owner = crate::state::instance_id().map(str::to_string);
     let persistence = Persistence::new(data_folder, owner.as_deref());
     let snapshot = match persistence.load() {
-        persist::Loaded::Ready { snapshot, warnings: load_warnings } => {
+        persist::Loaded::Ready {
+            snapshot,
+            warnings: load_warnings,
+        } => {
             warnings.extend(load_warnings);
             snapshot
         }
@@ -756,19 +754,15 @@ pub fn on_payload(server: &Server, player: &Player, data: &[u8]) {
                 send_frame(player, frame, minor);
             }
         }
-        Action::Mutation {
-            result,
-            minor,
-            broadcast,
-            recipients,
-        } => {
-            send_frame(player, &result, minor);
-            let Some(delta) = broadcast else {
+        Action::Mutation(frames) => {
+            send_frame(player, &frames.result, frames.minor);
+            let Some(delta) = frames.broadcast else {
                 return;
             };
             for candidate in server.get_all_players() {
                 let key = Peer::key(candidate.get_id());
-                let Some((_, candidate_minor)) = recipients
+                let Some((_, candidate_minor)) = frames
+                    .recipients
                     .iter()
                     .find(|(recipient, _)| *recipient == key)
                 else {
@@ -819,7 +813,11 @@ pub fn on_tick(server: &Server) {
                 }
                 let minor = session.effective_minor();
                 let supported = hub.service.is_some();
-                Some((key, minor, hub.status(session.is_operator(), minor, supported)))
+                Some((
+                    key,
+                    minor,
+                    hub.status(session.is_operator(), minor, supported),
+                ))
             })
             .collect();
         // A queued delta is addressed to every subscriber, read now so the
@@ -829,7 +827,11 @@ pub fn on_tick(server: &Server) {
         } else {
             hub.recipients()
         };
-        (statuses, std::mem::take(&mut hub.pending_deltas), subscribers)
+        (
+            statuses,
+            std::mem::take(&mut hub.pending_deltas),
+            subscribers,
+        )
     };
 
     for (key, minor, frame) in &statuses {

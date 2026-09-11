@@ -2,8 +2,8 @@
 //!
 //! The reference companion writes `<worldRoot>/confluxmap/shared_waypoints.json`
 //! - inside the world save, because it can read that directory. A Pumpkin plugin
-//! cannot: the WASI sandbox preopens exactly one directory, the plugin's own data
-//! folder, so the file lives there instead:
+//!   cannot: the WASI sandbox preopens exactly one directory, the plugin's own data
+//!   folder, so the file lives there instead:
 //!
 //! ```text
 //! plugins/data/confluxmap-pumpkin/shared_waypoints.json
@@ -199,7 +199,9 @@ impl Persistence {
             self.path
         )];
         match fs::rename(&self.path, &aside) {
-            Ok(()) => warnings.push(format!("set them aside as {aside}; starting an empty catalog")),
+            Ok(()) => warnings.push(format!(
+                "set them aside as {aside}; starting an empty catalog"
+            )),
             Err(error) => warnings.push(format!(
                 "could not set them aside ({error}); starting an empty catalog anyway"
             )),
@@ -284,7 +286,10 @@ fn from_document(root: &Value) -> Result<Snapshot, String> {
     if revision < 0 {
         return Err("revision is negative".to_string());
     }
-    let list = root.get("waypoints").and_then(Value::as_array).ok_or("waypoints is missing")?;
+    let list = root
+        .get("waypoints")
+        .and_then(Value::as_array)
+        .ok_or("waypoints is missing")?;
     if list.len() > MAX_PERSISTED_WAYPOINTS {
         return Err(format!("too many persisted waypoints: {}", list.len()));
     }
@@ -304,7 +309,10 @@ fn from_document(root: &Value) -> Result<Snapshot, String> {
     if revision == 0 && !waypoints.is_empty() {
         return Err("revision zero cannot contain waypoints".to_string());
     }
-    Ok(Snapshot { revision, waypoints })
+    Ok(Snapshot {
+        revision,
+        waypoints,
+    })
 }
 
 fn from_entry(entry: &Value) -> Result<Waypoint, String> {
@@ -323,8 +331,8 @@ fn from_entry(entry: &Value) -> Result<Waypoint, String> {
     };
 
     let id = Id::parse(&text("id")?).ok_or("id is not a canonical UUID")?;
-    let publisher_id = Id::parse(&text("publisherId")?)
-        .ok_or("publisherId is not a canonical UUID")?;
+    let publisher_id =
+        Id::parse(&text("publisherId")?).ok_or("publisherId is not a canonical UUID")?;
     let publisher_name = text("publisherName")?;
     let name = text("name")?;
     let dimension_id = text("dimensionId")?;
@@ -441,7 +449,7 @@ mod tests {
             kind: WaypointKind::Normal,
             icon_item_id: "minecraft:compass".to_string(),
             marker_label: "B".to_string(),
-            created_at_ms: 1_789_288_297_874,
+            created_at_ms: 1_712_345_678_901,
             revision,
         }
     }
@@ -526,8 +534,14 @@ mod tests {
         let (snapshot, warnings) = ready(persistence.load());
         assert_eq!(snapshot.revision, 1);
         assert_eq!(snapshot.waypoints.len(), 1);
-        assert_eq!(snapshot.waypoints[0].icon_item_id, "", "a pre-minor-3 field");
-        assert!(warnings.iter().any(|w| w.contains("migrating")), "{warnings:?}");
+        assert_eq!(
+            snapshot.waypoints[0].icon_item_id, "",
+            "a pre-minor-3 field"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("migrating")),
+            "{warnings:?}"
+        );
         // The migrated file is now the current schema.
         let text = fs::read_to_string(persistence.path()).expect("readable");
         assert!(text.contains("\"schemaVersion\": 2"));
@@ -538,8 +552,14 @@ mod tests {
     fn a_corrupt_file_is_quarantined_rather_than_served() {
         for (name, content) in [
             ("json", "{not json"),
-            ("shape", r#"{"schemaVersion":2,"revision":1,"waypoints":{}}"#),
-            ("revision", r#"{"schemaVersion":2,"revision":-1,"waypoints":[]}"#),
+            (
+                "shape",
+                r#"{"schemaVersion":2,"revision":1,"waypoints":{}}"#,
+            ),
+            (
+                "revision",
+                r#"{"schemaVersion":2,"revision":-1,"waypoints":[]}"#,
+            ),
             (
                 "value",
                 r#"{"schemaVersion":2,"revision":1,"waypoints":[{
@@ -606,7 +626,9 @@ mod tests {
             "another server's catalog is not this server's"
         );
         assert!(
-            warnings.iter().any(|w| w.contains("belong to server instance")),
+            warnings
+                .iter()
+                .any(|w| w.contains("belong to server instance")),
             "{warnings:?}"
         );
         assert!(std::path::Path::new(&format!("{}.bak", reader.path())).exists());

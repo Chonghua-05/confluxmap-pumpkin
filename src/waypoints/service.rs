@@ -185,6 +185,19 @@ impl Action {
     }
 }
 
+/// Who is mutating what, as the audit line and the retained result see it.
+#[derive(Clone, Copy, Debug)]
+struct Mutation<'a> {
+    /// The player the mutation is attributed to.
+    actor: &'a Actor,
+    /// The client's correlation id.
+    operation_id: Id,
+    /// What the mutation does.
+    action: Action,
+    /// The point it names, once one has been drawn or found.
+    waypoint_id: Option<Id>,
+}
+
 /// A request body without its correlation id, which is the cache key instead.
 #[derive(Clone, Debug)]
 enum RequestBody {
@@ -261,10 +274,10 @@ impl PlayerState {
 
     /// Retains an applied result, dropping the oldest once the cap is reached.
     fn remember(&mut self, operation_id: Id, body: RequestBody, result: MutationResult) {
-        if self.order.len() >= IDEMPOTENCY_RESULTS_PER_PLAYER {
-            if let Some(oldest) = self.order.pop_front() {
-                self.results.remove(&oldest);
-            }
+        if self.order.len() >= IDEMPOTENCY_RESULTS_PER_PLAYER
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.results.remove(&oldest);
         }
         self.order.push_back(operation_id);
         self.results.insert(
@@ -304,7 +317,9 @@ impl MutationBucket {
     fn try_consume(&mut self, now_ms: i64) -> bool {
         if now_ms > self.last_ms {
             let elapsed = (now_ms - self.last_ms) as f64;
-            self.tokens = self.capacity.min(self.tokens + elapsed * self.refill_per_ms);
+            self.tokens = self
+                .capacity
+                .min(self.tokens + elapsed * self.refill_per_ms);
             self.last_ms = now_ms;
         }
         if self.tokens < 1.0 {
@@ -328,10 +343,10 @@ impl TrackedPlayers {
     fn touch(&mut self, key: Id, now_ms: i64, mutations_per_minute: u32) -> &mut PlayerState {
         if let Some(position) = self.order.iter().position(|candidate| *candidate == key) {
             self.order.remove(position);
-        } else if self.states.len() >= MAX_TRACKED_PLAYERS {
-            if let Some(evicted) = self.order.pop_front() {
-                self.states.remove(&evicted);
-            }
+        } else if self.states.len() >= MAX_TRACKED_PLAYERS
+            && let Some(evicted) = self.order.pop_front()
+        {
+            self.states.remove(&evicted);
         }
         self.order.push_back(key);
         self.states
@@ -363,7 +378,12 @@ impl Service {
     /// A snapshot that no longer validates against the active world should be
     /// run through [`sanitize_loaded`] first; the service itself trusts the
     /// store it is handed.
-    pub fn new(store: Store, persistence: Persistence, limits: Limits, access: AccessPolicy) -> Self {
+    pub fn new(
+        store: Store,
+        persistence: Persistence,
+        limits: Limits,
+        access: AccessPolicy,
+    ) -> Self {
         Service {
             store,
             persistence,
@@ -408,22 +428,23 @@ impl Service {
         let now = crate::clock::now_ms();
         let key = actor.id;
         let body = RequestBody::Create(request.clone());
+        let mutation = Mutation {
+            actor,
+            operation_id,
+            action: Action::Create,
+            waypoint_id: None,
+        };
 
         {
             let player = players.touch(key, now, limits.mutations_per_minute);
-            if let Some(replay) =
-                replay_decision(player, operation_id, &body, store.revision(), actor, Action::Create, None)
-            {
+            if let Some(replay) = replay_decision(player, &body, store.revision(), mutation) {
                 return replay;
             }
             if !can_create(actor, access) {
                 return finish(
                     Some(player),
-                    operation_id,
                     body,
-                    actor,
-                    Action::Create,
-                    None,
+                    mutation,
                     reject(operation_id, store.revision(), MutationError::Forbidden),
                     now,
                 );
@@ -431,11 +452,8 @@ impl Service {
             if !player.bucket.try_consume(now) {
                 return finish(
                     Some(player),
-                    operation_id,
                     body,
-                    actor,
-                    Action::Create,
-                    None,
+                    mutation,
                     reject(operation_id, store.revision(), MutationError::RateLimited),
                     now,
                 );
@@ -445,12 +463,13 @@ impl Service {
         if request.expected_revision != store.revision() {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Create,
-                None,
-                reject(operation_id, store.revision(), MutationError::RevisionConflict),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::RevisionConflict,
+                ),
                 now,
             );
         }
@@ -468,12 +487,13 @@ impl Service {
         let Some(validated) = model::validate(&draft) else {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Create,
-                None,
-                reject(operation_id, store.revision(), MutationError::InvalidRequest),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::InvalidRequest,
+                ),
                 now,
             );
         };
@@ -481,86 +501,100 @@ impl Service {
         if !model::valid_publisher_name(publisher_name) {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Create,
-                None,
-                reject(operation_id, store.revision(), MutationError::InvalidRequest),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::InvalidRequest,
+                ),
                 now,
             );
         }
-        let Some(location) = LocationKey::of(&validated.dimension_id, validated.x, validated.y, validated.z)
-        else {
+        let Some(location) = LocationKey::of(
+            &validated.dimension_id,
+            validated.x,
+            validated.y,
+            validated.z,
+        ) else {
             // Unreachable after validation; the finite check is immediate.
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Create,
-                None,
-                reject(operation_id, store.revision(), MutationError::InvalidRequest),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::InvalidRequest,
+                ),
                 now,
             );
         };
         if store.find_at(&location).is_some() {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Create,
-                None,
-                reject(operation_id, store.revision(), MutationError::DuplicateLocation),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::DuplicateLocation,
+                ),
                 now,
             );
         }
         if store.len() >= limits.max_per_world {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Create,
-                None,
-                reject(operation_id, store.revision(), MutationError::WorldQuotaExceeded),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::WorldQuotaExceeded,
+                ),
                 now,
             );
         }
         if store.count_published_by(actor.id) >= limits.max_per_player {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Create,
-                None,
-                reject(operation_id, store.revision(), MutationError::PlayerQuotaExceeded),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::PlayerQuotaExceeded,
+                ),
                 now,
             );
         }
         let Some(id) = unique_id(store) else {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Create,
-                None,
-                reject(operation_id, store.revision(), MutationError::IdGenerationFailed),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::IdGenerationFailed,
+                ),
                 now,
             );
         };
         let Some(next_revision) = store.revision().checked_add(1) else {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Create,
-                Some(id),
-                reject(operation_id, store.revision(), MutationError::PersistenceFailed),
+                Mutation {
+                    waypoint_id: Some(id),
+                    ..mutation
+                },
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::PersistenceFailed,
+                ),
                 now,
             );
         };
@@ -585,11 +619,11 @@ impl Service {
             Err(error) => {
                 return finish(
                     players.state_mut(key),
-                    operation_id,
                     body,
-                    actor,
-                    Action::Create,
-                    Some(id),
+                    Mutation {
+                        waypoint_id: Some(id),
+                        ..mutation
+                    },
                     reject(operation_id, store.revision(), store_error(error)),
                     now,
                 );
@@ -597,15 +631,19 @@ impl Service {
         };
         let result = match persist(store, persistence, prepared, operation_id, actor) {
             Some(delta) => applied(operation_id, delta),
-            None => reject(operation_id, store.revision(), MutationError::PersistenceFailed),
+            None => reject(
+                operation_id,
+                store.revision(),
+                MutationError::PersistenceFailed,
+            ),
         };
         finish(
             players.state_mut(key),
-            operation_id,
             body,
-            actor,
-            Action::Create,
-            Some(id),
+            Mutation {
+                waypoint_id: Some(id),
+                ..mutation
+            },
             result,
             now,
         )
@@ -629,28 +667,23 @@ impl Service {
         let now = crate::clock::now_ms();
         let key = actor.id;
         let body = RequestBody::Delete(request.clone());
+        let mutation = Mutation {
+            actor,
+            operation_id,
+            action: Action::Delete,
+            waypoint_id: Some(request.id),
+        };
 
         {
             let player = players.touch(key, now, limits.mutations_per_minute);
-            if let Some(replay) = replay_decision(
-                player,
-                operation_id,
-                &body,
-                store.revision(),
-                actor,
-                Action::Delete,
-                Some(request.id),
-            ) {
+            if let Some(replay) = replay_decision(player, &body, store.revision(), mutation) {
                 return replay;
             }
             if !player.bucket.try_consume(now) {
                 return finish(
                     Some(player),
-                    operation_id,
                     body,
-                    actor,
-                    Action::Delete,
-                    Some(request.id),
+                    mutation,
                     reject(operation_id, store.revision(), MutationError::RateLimited),
                     now,
                 );
@@ -660,11 +693,8 @@ impl Service {
         let Some(current) = store.find(request.id).cloned() else {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Delete,
-                Some(request.id),
+                mutation,
                 reject(operation_id, store.revision(), MutationError::NotFound),
                 now,
             );
@@ -672,23 +702,21 @@ impl Service {
         if request.expected_revision != current.revision {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Delete,
-                Some(request.id),
-                reject(operation_id, store.revision(), MutationError::RevisionConflict),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::RevisionConflict,
+                ),
                 now,
             );
         }
         if !can_manage(actor, &current, access) {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Delete,
-                Some(request.id),
+                mutation,
                 reject(operation_id, store.revision(), MutationError::Forbidden),
                 now,
             );
@@ -698,11 +726,8 @@ impl Service {
             Err(error) => {
                 return finish(
                     players.state_mut(key),
-                    operation_id,
                     body,
-                    actor,
-                    Action::Delete,
-                    Some(request.id),
+                    mutation,
                     reject(operation_id, store.revision(), store_error(error)),
                     now,
                 );
@@ -710,18 +735,13 @@ impl Service {
         };
         let result = match persist(store, persistence, prepared, operation_id, actor) {
             Some(delta) => applied(operation_id, delta),
-            None => reject(operation_id, store.revision(), MutationError::PersistenceFailed),
+            None => reject(
+                operation_id,
+                store.revision(),
+                MutationError::PersistenceFailed,
+            ),
         };
-        finish(
-            players.state_mut(key),
-            operation_id,
-            body,
-            actor,
-            Action::Delete,
-            Some(request.id),
-            result,
-            now,
-        )
+        finish(players.state_mut(key), body, mutation, result, now)
     }
 
     /// Applies an update request.
@@ -744,28 +764,23 @@ impl Service {
         let now = crate::clock::now_ms();
         let key = actor.id;
         let body = RequestBody::Update(request.clone());
+        let mutation = Mutation {
+            actor,
+            operation_id,
+            action: Action::Update,
+            waypoint_id: Some(request.id),
+        };
 
         {
             let player = players.touch(key, now, limits.mutations_per_minute);
-            if let Some(replay) = replay_decision(
-                player,
-                operation_id,
-                &body,
-                store.revision(),
-                actor,
-                Action::Update,
-                Some(request.id),
-            ) {
+            if let Some(replay) = replay_decision(player, &body, store.revision(), mutation) {
                 return replay;
             }
             if !player.bucket.try_consume(now) {
                 return finish(
                     Some(player),
-                    operation_id,
                     body,
-                    actor,
-                    Action::Update,
-                    Some(request.id),
+                    mutation,
                     reject(operation_id, store.revision(), MutationError::RateLimited),
                     now,
                 );
@@ -775,11 +790,8 @@ impl Service {
         let Some(current) = store.find(request.id).cloned() else {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Update,
-                Some(request.id),
+                mutation,
                 reject(operation_id, store.revision(), MutationError::NotFound),
                 now,
             );
@@ -787,11 +799,8 @@ impl Service {
         if !can_manage(actor, &current, access) {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Update,
-                Some(request.id),
+                mutation,
                 reject(operation_id, store.revision(), MutationError::Forbidden),
                 now,
             );
@@ -799,12 +808,13 @@ impl Service {
         if request.expected_revision != current.revision {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Update,
-                Some(request.id),
-                reject(operation_id, store.revision(), MutationError::RevisionConflict),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::RevisionConflict,
+                ),
                 now,
             );
         }
@@ -822,26 +832,31 @@ impl Service {
         let Some(validated) = model::validate(&draft) else {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Update,
-                Some(request.id),
-                reject(operation_id, store.revision(), MutationError::InvalidRequest),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::InvalidRequest,
+                ),
                 now,
             );
         };
-        let Some(updated_location) =
-            LocationKey::of(&validated.dimension_id, validated.x, validated.y, validated.z)
-        else {
+        let Some(updated_location) = LocationKey::of(
+            &validated.dimension_id,
+            validated.x,
+            validated.y,
+            validated.z,
+        ) else {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Update,
-                Some(request.id),
-                reject(operation_id, store.revision(), MutationError::InvalidRequest),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::InvalidRequest,
+                ),
                 now,
             );
         };
@@ -855,24 +870,26 @@ impl Service {
         {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Update,
-                Some(request.id),
-                reject(operation_id, store.revision(), MutationError::DuplicateLocation),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::DuplicateLocation,
+                ),
                 now,
             );
         }
         let Some(next_revision) = store.revision().checked_add(1) else {
             return finish(
                 players.state_mut(key),
-                operation_id,
                 body,
-                actor,
-                Action::Update,
-                Some(request.id),
-                reject(operation_id, store.revision(), MutationError::PersistenceFailed),
+                mutation,
+                reject(
+                    operation_id,
+                    store.revision(),
+                    MutationError::PersistenceFailed,
+                ),
                 now,
             );
         };
@@ -897,11 +914,8 @@ impl Service {
             Err(error) => {
                 return finish(
                     players.state_mut(key),
-                    operation_id,
                     body,
-                    actor,
-                    Action::Update,
-                    Some(request.id),
+                    mutation,
                     reject(operation_id, store.revision(), store_error(error)),
                     now,
                 );
@@ -909,18 +923,13 @@ impl Service {
         };
         let result = match persist(store, persistence, prepared, operation_id, actor) {
             Some(delta) => applied(operation_id, delta),
-            None => reject(operation_id, store.revision(), MutationError::PersistenceFailed),
+            None => reject(
+                operation_id,
+                store.revision(),
+                MutationError::PersistenceFailed,
+            ),
         };
-        finish(
-            players.state_mut(key),
-            operation_id,
-            body,
-            actor,
-            Action::Update,
-            Some(request.id),
-            result,
-            now,
-        )
+        finish(players.state_mut(key), body, mutation, result, now)
     }
 }
 
@@ -978,14 +987,11 @@ fn valid_for_active_world(waypoint: &Waypoint) -> bool {
 /// replays the retained result; a changed body is a collision, audited once.
 fn replay_decision(
     player: &mut PlayerState,
-    operation_id: Id,
     body: &RequestBody,
     revision: i64,
-    actor: &Actor,
-    action: Action,
-    waypoint_id: Option<Id>,
+    mutation: Mutation<'_>,
 ) -> Option<MutationResult> {
-    match player.results.get(&operation_id) {
+    match player.results.get(&mutation.operation_id) {
         None => return None,
         Some(cached) if cached.body.matches(body) => {
             let mut result = cached.result.clone();
@@ -994,7 +1000,7 @@ fn replay_decision(
         }
         Some(_) => {}
     }
-    let first_collision = match player.results.get_mut(&operation_id) {
+    let first_collision = match player.results.get_mut(&mutation.operation_id) {
         Some(cached) => {
             if cached.collision_audited {
                 false
@@ -1005,13 +1011,14 @@ fn replay_decision(
         }
         None => false,
     };
-    let collision = reject(operation_id, revision, MutationError::InvalidRequest);
+    let collision = reject(
+        mutation.operation_id,
+        revision,
+        MutationError::InvalidRequest,
+    );
     if first_collision {
         audit(
-            actor,
-            operation_id,
-            action,
-            waypoint_id,
+            &mutation,
             collision.status,
             collision.error,
             revision,
@@ -1024,27 +1031,21 @@ fn replay_decision(
 /// Retains an applied result and audits every outcome.
 fn finish(
     player: Option<&mut PlayerState>,
-    operation_id: Id,
     body: RequestBody,
-    actor: &Actor,
-    action: Action,
-    waypoint_id: Option<Id>,
+    mutation: Mutation<'_>,
     result: MutationResult,
     now: i64,
 ) -> MutationResult {
     // Only applied results are retained. Caching a refusal would replay a
     // transient `RATE_LIMITED` or `PERSISTENCE_FAILED` forever, and would keep a
     // full result per refusal.
-    if result.applied() {
-        if let Some(player) = player {
-            player.remember(operation_id, body, result.clone());
-        }
+    if result.applied()
+        && let Some(player) = player
+    {
+        player.remember(mutation.operation_id, body, result.clone());
     }
     audit(
-        actor,
-        operation_id,
-        action,
-        waypoint_id,
+        &mutation,
         result.status,
         result.error,
         result.delta.revision,
@@ -1113,22 +1114,20 @@ fn reject(operation_id: Id, revision: i64, error: MutationError) -> MutationResu
 /// someone other than the players, and the reference audit event excludes
 /// player content for the same reason.
 fn audit(
-    actor: &Actor,
-    operation_id: Id,
-    action: Action,
-    waypoint_id: Option<Id>,
+    mutation: &Mutation<'_>,
     status: MutationStatus,
     error: MutationError,
     revision: i64,
     now: i64,
 ) {
-    let waypoint = waypoint_id
+    let waypoint = mutation
+        .waypoint_id
         .map(|id| id.to_string())
         .unwrap_or_else(|| "none".to_string());
     info!(
-        operation_id = %operation_id,
-        actor_id = %actor.id,
-        action = action.tag(),
+        operation_id = %mutation.operation_id,
+        actor_id = %mutation.actor.id,
+        action = mutation.action.tag(),
         status = ?status,
         error = ?error,
         waypoint_id = %waypoint,
@@ -1208,7 +1207,12 @@ mod tests {
     }
 
     fn service(folder: &str, limits: Limits, access: AccessPolicy) -> Service {
-        Service::new(Store::empty(), Persistence::new(folder, None), limits, access)
+        Service::new(
+            Store::empty(),
+            Persistence::new(folder, None),
+            limits,
+            access,
+        )
     }
 
     fn create_request(operation: u64, expected_revision: i64, x: f64) -> CreateRequest {
@@ -1247,7 +1251,7 @@ mod tests {
             kind: WaypointKind::Normal,
             icon_item_id: "minecraft:compass".to_string(),
             marker_label: "B".to_string(),
-            created_at_ms: 1_789_288_297_874,
+            created_at_ms: 1_712_345_678_901,
             revision,
         }
     }
@@ -1280,7 +1284,11 @@ mod tests {
         let mut service = service(&folder, limits(512, 64, 600), AccessPolicy::OwnerManaged);
         let author = actor(1, true);
 
-        assert!(service.create(&author, &create_request(1, 0, 12.5)).applied());
+        assert!(
+            service
+                .create(&author, &create_request(1, 0, 12.5))
+                .applied()
+        );
         let stale = service.create(&author, &create_request(2, 0, 40.0));
         assert_eq!(stale.error, MutationError::RevisionConflict);
         assert_eq!(service.snapshot().revision, 1, "a refusal moves nothing");
@@ -1294,7 +1302,11 @@ mod tests {
         let mut service = service(&folder, limits(512, 64, 600), AccessPolicy::OwnerManaged);
         let author = actor(1, true);
 
-        assert!(service.create(&author, &create_request(1, 0, 12.5)).applied());
+        assert!(
+            service
+                .create(&author, &create_request(1, 0, 12.5))
+                .applied()
+        );
         // 12.9 floors into the block 12.5 already occupies.
         let duplicate = service.create(&author, &create_request(2, 1, 12.9));
         assert_eq!(duplicate.error, MutationError::DuplicateLocation);
@@ -1316,7 +1328,11 @@ mod tests {
 
         let folder = scratch("player-quota");
         let mut player = service(&folder, limits(10, 1, 600), AccessPolicy::OwnerManaged);
-        assert!(player.create(&author, &create_request(1, 0, 12.5)).applied());
+        assert!(
+            player
+                .create(&author, &create_request(1, 0, 12.5))
+                .applied()
+        );
         assert_eq!(
             player.create(&author, &create_request(2, 1, 40.0)).error,
             MutationError::PlayerQuotaExceeded
@@ -1335,7 +1351,11 @@ mod tests {
         assert_eq!(service.snapshot().revision, 0);
 
         // The same request from an operator is accepted.
-        assert!(service.create(&actor(2, true), &create_request(2, 0, 12.5)).applied());
+        assert!(
+            service
+                .create(&actor(2, true), &create_request(2, 0, 12.5))
+                .applied()
+        );
         fs_cleanup(&folder);
     }
 
@@ -1353,7 +1373,10 @@ mod tests {
 
         let replay = service.create(&author, &request);
         assert!(replay.applied());
-        assert!(replay.replayed, "a retried operation must be reported as a replay");
+        assert!(
+            replay.replayed,
+            "a retried operation must be reported as a replay"
+        );
         assert_eq!(service.snapshot().revision, revision);
         assert_eq!(service.snapshot().waypoints.len(), 1);
 
@@ -1384,7 +1407,11 @@ mod tests {
         }
         let limited = service.create(&author, &create_request(99, 10, 1000.0));
         assert_eq!(limited.error, MutationError::RateLimited);
-        assert_eq!(service.snapshot().waypoints.len(), 10, "nothing extra landed");
+        assert_eq!(
+            service.snapshot().waypoints.len(),
+            10,
+            "nothing extra landed"
+        );
         fs_cleanup(&folder);
     }
 
@@ -1464,7 +1491,10 @@ mod tests {
         let updated = service.update(&owner, &request);
         assert!(updated.applied(), "{:?}", updated.error);
         let waypoint = updated.delta.waypoint.expect("the point");
-        assert_eq!(waypoint.id, original.id, "the id is server-owned and stable");
+        assert_eq!(
+            waypoint.id, original.id,
+            "the id is server-owned and stable"
+        );
         assert_eq!(waypoint.publisher_id, owner.id);
         assert_eq!(waypoint.publisher_name, original.publisher_name);
         assert_eq!(waypoint.created_at_ms, original.created_at_ms);
@@ -1475,11 +1505,7 @@ mod tests {
 
     #[test]
     fn duplicate_location_is_downgraded_for_a_legacy_peer() {
-        let result = reject(
-            Id { high: 0, low: 1 },
-            0,
-            MutationError::DuplicateLocation,
-        );
+        let result = reject(Id { high: 0, low: 1 }, 0, MutationError::DuplicateLocation);
         assert_eq!(result.status_code(), proto::RESULT_STATUS_REJECTED);
         assert_eq!(result.error_code(0), proto::RESULT_ERROR_INVALID_REQUEST);
         assert_eq!(result.error_code(1), proto::RESULT_ERROR_DUPLICATE_LOCATION);
@@ -1525,7 +1551,14 @@ mod tests {
     fn the_player_cap_evicts_the_least_recently_used() {
         let mut players = TrackedPlayers::default();
         for index in 0..MAX_TRACKED_PLAYERS as u64 {
-            players.touch(Id { high: 0, low: index }, 0, 600);
+            players.touch(
+                Id {
+                    high: 0,
+                    low: index,
+                },
+                0,
+                600,
+            );
         }
         assert_eq!(players.len(), MAX_TRACKED_PLAYERS);
 

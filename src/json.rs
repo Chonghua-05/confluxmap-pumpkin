@@ -77,7 +77,6 @@ impl Value {
             _ => None,
         }
     }
-
 }
 
 /// Why a document was rejected. The text is for a log line, not for a client.
@@ -245,7 +244,9 @@ impl Parser<'_> {
         self.take();
         let mut out = String::new();
         loop {
-            let byte = self.take().ok_or_else(|| JsonError::new("unterminated string"))?;
+            let byte = self
+                .take()
+                .ok_or_else(|| JsonError::new("unterminated string"))?;
             match byte {
                 b'"' => return Ok(out),
                 b'\\' => {
@@ -375,7 +376,10 @@ mod tests {
         .expect("valid document");
         assert_eq!(value.get("schemaVersion").and_then(Value::as_i64), Some(2));
         assert_eq!(value.get("ownerInstanceId"), Some(&Value::Null));
-        let list = value.get("waypoints").and_then(Value::as_array).expect("array");
+        let list = value
+            .get("waypoints")
+            .and_then(Value::as_array)
+            .expect("array");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].get("x").and_then(Value::as_f64), Some(1.5));
         assert_eq!(list[0].get("colorArgb").and_then(Value::as_i64), Some(-1));
@@ -400,12 +404,16 @@ mod tests {
     #[test]
     fn resolves_escapes_including_surrogate_pairs() {
         let value = parse(r#"{"s":"a\n\"b\u00a7\u4e00\ud83d\ude00"}"#).expect("valid");
-        assert_eq!(value.get("s").and_then(Value::as_str), Some("a\n\"b\u{a7}\u{4e00}\u{1f600}"));
+        assert_eq!(
+            value.get("s").and_then(Value::as_str),
+            Some("a\n\"b\u{a7}\u{4e00}\u{1f600}")
+        );
     }
 
     #[test]
     fn accepts_the_literals_and_empty_containers() {
-        let value = parse(r#"{"o":{},"a":[],"t":true,"f":false,"n":null,"neg":-12}"#).expect("valid");
+        let value =
+            parse(r#"{"o":{},"a":[],"t":true,"f":false,"n":null,"neg":-12}"#).expect("valid");
         assert_eq!(value.get("o").and_then(Value::as_array), None);
         assert_eq!(value.get("neg").and_then(Value::as_i64), Some(-12));
         assert_eq!(value.get("t"), Some(&Value::Bool(true)));
@@ -424,11 +432,15 @@ mod tests {
         assert_eq!(number(1.0), "1.0");
         assert_eq!(number(-0.5), "-0.5");
         assert_eq!(number(12_345.0), "12345.0");
-        let document = format!(r#"{{"rev":{},"x":{}}}"#, 1_789_288_297_874_145_099i64, number(64.0));
+        let document = format!(
+            r#"{{"rev":{},"x":{}}}"#,
+            81_985_529_216_486_895i64,
+            number(64.0)
+        );
         let parsed = parse(&document).expect("valid");
         assert_eq!(
             parsed.get("rev").and_then(Value::as_i64),
-            Some(1_789_288_297_874_145_099)
+            Some(81_985_529_216_486_895)
         );
         assert_eq!(parsed.get("x").and_then(Value::as_f64), Some(64.0));
     }

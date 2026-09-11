@@ -700,8 +700,8 @@ mod tests {
         assert_eq!(parse_seed("123"), Some(123));
         assert_eq!(parse_seed(" -7 "), Some(-7));
         assert_eq!(
-            parse_seed("1_789_288_297_874_145_099"),
-            Some(1_789_288_297_874_145_099)
+            parse_seed("81_985_529_216_486_895"),
+            Some(81_985_529_216_486_895)
         );
         assert_eq!(parse_seed("18446744073709551615"), Some(-1));
         assert_eq!(parse_seed("not-a-number"), None);
