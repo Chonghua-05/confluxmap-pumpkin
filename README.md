@@ -48,11 +48,7 @@ confluxmap 的完整形态是"预测 → 校正"。该链条在 Pumpkin 上无�
 | 锁定的插件 API | `pumpkin-plugin-api = 0.1.0-dev+26.2-26.45` |
 | 对应服务端 build | `0.1.0-dev+26.2-26.45` |
 | 对应 Minecraft | 26.2（Java 协议 776） |
-| 插件形态 | `wasm32-wasip2` 组件，置于 `plugins/` 目录即可加载，无需改动或重新编译服务端 |
-
-插件 API 的版本号与服务端 build 一一对应：插件的编译产物与宿主的 WIT ABI 绑定，服务端升级后须同步更新该依赖并重新编译；`Cargo.lock` 亦锁定同一 build，两者需一并更新。运行中的服务端版本可由 `/cfm status` 输出的 `server_version` 核对。
-
-客户端侧不受此约束。Pumpkin 接受的协议号范围为 1.7.2 至其自身版本，因此较早版本的客户端亦可连接并完成握手，例如 1.17.1（协议 756）。
+| 插件形态 | `wasm32-wasip2` 组件，置于 `plugins/` 目录即可加载 |
 
 ## 安装
 
@@ -73,9 +69,9 @@ confluxmap 的完整形态是"预测 → 校正"。该链条在 Pumpkin 上无�
    seed = 81985529216486895
    ```
 
-   随后执行 `/cfm reload` 即时生效，无需重启；重启同样可以。
+   随后执行 `/cfm reload` 即时生效。
 
-   `tools/inject_seed.py` 会读取 `pumpkin.toml` 顶层的 `seed` 写入该文件，可避免两处取值不一致：
+   [可选]`tools/inject_seed.py` 会读取 `pumpkin.toml` 顶层的 `seed` 写入该文件，可避免两处取值不一致：
 
    ```bash
    python3 tools/inject_seed.py /path/to/pumpkin.toml
