@@ -127,7 +127,7 @@ handshake, and this plugin sends it nothing.
 5. Verify: `/cfm seed` should print the seed, the world ID and the worldgen version, and the
    load log should contain `seed = ...` and `load complete`.
 
-Two points deserve attention during installation:
+One point deserves attention during installation:
 
 - **Permission confirmation.** Pumpkin defaults to `ask_permission_confirmation = true`, so on
   its first load the plugin lists the permissions it requests (`fs.read.data`,
@@ -137,10 +137,6 @@ Two points deserve attention during installation:
   pre-approve the permissions this plugin requests in `allowed_permissions`. Decisions are
   recorded per plugin file hash in `plugins/permission_cache.json`, so an updated plugin file
   is confirmed again.
-- **Unsigned plugin.** This plugin is unsigned and prints the corresponding warning on load.
-  Pumpkin defaults to `allow_unsigned = true` and continues loading; if your server has turned
-  that off, either allow it for this plugin alone with `allow_unsigned = true` under
-  `[plugins.overrides.confluxmap-pumpkin]`, or sign the plugin.
 
 ## Building and testing
 

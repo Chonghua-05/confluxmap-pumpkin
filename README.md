@@ -114,10 +114,9 @@ confluxmap 的完整形态是「预测 → 校正」。校正这一半在 Pumpki
 
 5. 核对：`/cfm seed` 应显示种子、世界 ID 与 worldgen 版本；加载日志中应出现 `seed = ...` 与 `load complete`。
 
-安装时需注意两点：
+安装时需注意：
 
 - **权限确认。** Pumpkin 默认 `ask_permission_confirmation = true`，插件首次加载会在控制台列出其申请的权限（`fs.read.data`、`fs.write.data`）并等待确认；控制台不可交互时按拒绝处理，插件不会加载。以无控制台方式启动的服务端，请设置 `[plugins] ask_permission_confirmation = false`，或将该插件申请的权限列入 `allowed_permissions` 预先批准。已作出的决定按插件文件哈希记录于 `plugins/permission_cache.json`，插件文件更新后需重新确认。
-- **未签名插件。** 本插件未签名，加载时会打印相应告警。Pumpkin 默认 `allow_unsigned = true`，会继续加载；若服务端已关闭该项，可通过 `[plugins.overrides.confluxmap-pumpkin]` 的 `allow_unsigned = true` 单独放行，或对插件签名。
 
 ## 构建与测试
 
