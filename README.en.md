@@ -4,7 +4,7 @@
 
 [简体中文](README.md) | English
 
-A companion plugin for [confluxmap](https://github.com/Chonghua-05/conflux-map) on the
+A companion plugin for [confluxmap](https://github.com/Conflux-Union/conflux-map) on the
 [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin) server.
 
 ## Upstream projects
