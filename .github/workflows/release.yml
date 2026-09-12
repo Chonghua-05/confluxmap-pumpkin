@@ -46,11 +46,11 @@ jobs:
       - name: package
         run: |
           mkdir -p dist
-          cp target/wasm32-wasip2/release/confluxmap_pumpkin.wasm dist/
+          cp target/wasm32-wasip2/release/confluxmap_pumpkin.wasm "dist/confluxmap_pumpkin-${{ github.ref_name }}.wasm"
           ls -l dist/
 
       - name: publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/confluxmap_pumpkin.wasm
+          files: dist/confluxmap_pumpkin-${{ github.ref_name }}.wasm
           generate_release_notes: true
