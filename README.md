@@ -4,7 +4,7 @@
 
 简体中文 | [English](README.en.md)
 
-[confluxmap](https://github.com/Chonghua-05/conflux-map) 在
+[confluxmap](https://github.com/Conflux-Union/conflux-map) 在
 [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin) 服务端上的伴侣插件。
 
 ## 上游项目
