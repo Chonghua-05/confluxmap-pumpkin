@@ -44,6 +44,7 @@ use pumpkin_plugin_api::{
         EventData, EventHandler, EventPriority, PlayerCustomPayloadEvent, PlayerJoinEvent,
         PlayerLeaveEvent, PlayerLoginEvent, PlayerRegisterChannelEvent,
     },
+    permission::{Permission, PermissionDefault},
     permissions, register_plugin,
     scheduler::SchedulerExt,
 };
@@ -365,6 +366,17 @@ impl Plugin for ConfluxMapPlugin {
                     )
                     .then(CommandNode::literal("clear").execute(commands::WaypointsClearHandler)),
             );
+        // The command requirement checks `PLUGIN_NAME:cfm.use`, and a node the
+        // permission manager has never heard of denies every player — even ops —
+        // which silently drops `/cfm` from clients (RCON bypasses the check, so
+        // console keeps working). Registering the node here is what makes the
+        // command visible to players at all.
+        let _ = context.register_permission(&Permission {
+            node: format!("{PLUGIN_NAME}:cfm.use"),
+            description: "Use the /cfm command tree".to_string(),
+            default: PermissionDefault::Allow,
+            children: Vec::new(),
+        });
         context.register_command(root, "cfm.use");
         info!("[confluxmap] /cfm registered (status|seed|hello|reload|waypoints)");
         info!("[confluxmap] load complete");
