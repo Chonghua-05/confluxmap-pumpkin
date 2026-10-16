@@ -40,14 +40,10 @@ Pumpkin 的插件是 `wasm32-wasip2` 组件，只能用 WIT 暴露的接口，�
 | 定时与循环任务 | `scheduler.wit:9,18,23` | `wasm_host/.../scheduler.rs:7,28,50`，每 tick 驱动 `server/mod.rs:1113` | 无 | 可用；无"下一 tick"专用接口，用 `delay = 0` 代替。插件以 20 tick 周期任务刷新 op 变化（`src/lib.rs:343`） |
 | 权限 / op 查询 | `permission.wit:11-17`、`player.wit:866` | `wasm_host/.../player.rs:1435-1441`、`server.rs:741`（`is_op`） | 无 | 可用，但 **`permission-level` 枚举在 Rust 侧不可命名**，只能 `as u8` 取判别值（见 §一附录） |
 | 命令注册 | `command.wit:17-24` | `wit/v0_1/commands/mod.rs:295,310,591,596` | 无 | 可用，支持子命令；无可选参数标志 |
-| 本地持久化 | 无 `fs.wit`，走 WASI preopen | `wasm_host/mod.rs:376-390` → 映射到 `plugins/data/<插件名>` | `fs.read.data` / `fs.write.data` | 可用，**仅限插件私有目录**，无目录外读写；已用于 `shared_waypoints.json` 与 `server_instance.json` |
-| UUID 生成 | `uuid.wit:9`（`generate`） | `wasm_host/wit/v0_1/uuid.rs:5-10` | 无 | **插件侧不可达**：`plugin.wit` 的导入列表（`:17-79`）没有 `import uuid`，Rust 绑定不生成该导入（见 §一附录） |
-| TCP 监听 / 网络服务 | 无 WIT 接口 | 宿主链接 WASI sockets 与 http：`wasm_host/mod.rs:266-269`；socket 策略 `:334-353` | `network.tcp.bind`、`network.outbound`、`http.outbound` 等 | 可用但需自行基于 `wasi:sockets` 实现协议；WASI 只提供**出站** HTTP，无 HTTP 服务端接口 |
-| 已加载区块读写 | `world.wit:800-801`，`chunk` 资源 `:642` | `wasm_host/.../world.rs:655-676`；方块 `world/mod.rs:6052` | 无 | 部分可用：`get-chunk` 未加载即返回 `None`，**无法枚举**已加载区块 |
-| 世界存档（region `.mca`） | 无 | 无 | — | 不可用，且插件拿不到世界目录路径 |
-| 世界种子 | 无访问器 | — | — | 不可用（本插件因此改为从自己的配置文件读） |
-| 世界高度上下限 | 无访问器 | — | — | 不可用，插件拿不到维度的 `min_y` / `max_y`；路径点高度校验因此改用客户端坐标边界（见 §三） |
-| 世界 ID / 维度列表 / 服务端版本 / 视距 / 玩家位置 | `world.wit`、`server.wit:245`、`player.rs:1389` | 有 | 视距查询需 `sys.info` 视用途 | 可用；世界 ID 是**世界名**（`wasm_host/.../world.rs:616`），不是 confluxmap 协议的 worldId |
+| 本地持久化 | 无 `fs.wit`，走 WASI preopen | `wasm_host/mod.rs:376-390` → 映射到 `plugins/data/<插件名>` | `fs.read.data` / `fs.write.data` | 可用，映射为沙箱内的 `data` 目录；已用于 `shared_waypoints.json`、`server_instance.json` 与软链接存档访问 |
+| 世界存档（region `.mca`） | 文件系统读取 | `std::fs` | `fs.read.data` | **可用**：服主将世界目录软链接至 `plugins/data/<name>/world`，插件即可直接以只读方式解压扫描 `.mca` 区域文件并提供权威纠错 |
+| 世界种子与版本 | NBT 文件级联读取 | `world/data/...` | `fs.read.data` | **可用**：对齐官方级联规则，优先读取 `world_gen_settings.dat`，回退读取 `level.dat`，自动提取权威种子与 Minecraft 版本 |
+| 视距与玩家位置 | `server.wit:245`、`player.wit` (`get-position`) | `wasm_host/...` | 无 | **可用**：已用于 `0x11 SERVER_VIEW_DISTANCE` 与 `0x14 PLAYER_POSITIONS`（实体雷达广播） |
 | 超平坦预设 / 生成器 preset | `world.wit:937-938` 仅"设置自定义生成器" | — | — | 读不到世界 preset，不可用 |
 
 ### 陷阱项（WIT 有事件声明，服务端无派发点）

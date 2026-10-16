@@ -16,66 +16,28 @@ A companion plugin for [confluxmap](https://github.com/Conflux-Union/conflux-map
 
 ## Feature support
 
-This plugin implements the usable form of confluxmap on Pumpkin: **it hands out
-the seed**, the client renders the predicted map locally, and authoritative corrections stay
-disabled. Shared waypoints and the server instance identity were added in v0.1.1. The tables
-below split the feature surface by whether a feature can be built on
-Pumpkin at all; the criteria and the per-item evidence, including Pumpkin source locations,
-are in [docs/pumpkin-capabilities.md](docs/pumpkin-capabilities.md) (in Chinese).
+This plugin implements the **complete core companion suite** of confluxmap on Pumpkin: **automatic seed and version extraction from world archives**, **authoritative map corrections from Anvil MCA saves**, **entity radar stream (player coordinates broadcast)**, **view distance synchronization**, **server instance isolation**, and **shared waypoints**.
 
 ### Supported
 
 | Capability | Notes |
 |---|---|
-| Channel declaration | Announces `confluxmap:map_sync` and `confluxmap:waypoints_v1` to the client with `minecraft:register` at login. A Paper server sends that on the plugin's behalf; Pumpkin has no such API, and without the announcement the client never starts the handshake |
-| Handshake reply | Answers a `HELLO` with `HELLO_POLICY`; a client that advertises capabilities also receives `0x12` / `0x13` first. The handshake completes in a single round trip and no further messages follow |
-| World seed | Sets `seedGranted = 1` and carries the seed per dimension |
-| worldgen version | Lets the client select terrain generation parameters |
-| World ID | Used by the client as the namespace of its map cache |
-| Dimension list | Predictability and generator preset per dimension; `minecraft:overworld` only by default |
-| Budgets | Carries the `Budgets` field in the policy. On that channel this plugin answers nothing but `HELLO`; the field exists only so that the client's parser does not see a degenerate value |
-| Seed sharing switch | With `share_seed = false` the policy is sent as `seedGranted = 0` instead |
-| Corrections disabled | `correctionsEnabled = 0`, which puts the client into `SERVER_DISABLED`: the session stays ACTIVE and the seed stays usable, but no authoritative patches are requested |
-| Server instance identity | Granting `SERVER_INSTANCE` (capability id 7) to a client that advertises a capability offer in `predictorVersion`; the handshake replies with `0x13` carrying this instance's UUID, which the client uses as its storage namespace to tell apart several sub-worlds that share one worldId behind a Velocity proxy |
-| Shared waypoints | The separate `confluxmap:waypoints_v1` channel (protocol 1.3): subscription, create, update, delete and broadcast, with upstream semantics |
-| Payload validation | Strict decoding: the type byte, the UTF-8 length cap, and the requirement that the frame be consumed exactly |
-| Operator commands | `/cfm status`, `/cfm seed`, `/cfm hello`, `/cfm reload`, `/cfm waypoints` |
+| **Channel declaration** | Announces `confluxmap:map_sync` and `confluxmap:waypoints_v1` to the client with `minecraft:register` at login. |
+| **Automatic Archive Seed & Version Discovery** | Aligned with Pumpkin's `stored_world_seed` cascade reader: automatically extracts seed and Minecraft version from mounted world saves (`world_gen_settings.dat` -> `level.dat`). |
+| **Authoritative Map Corrections** | Answers `0x0C MAP_REGION_VIEW_REQ` and `0x03 MAP_VIEW_REQ`, reading `region/r.*.*.mca` via read-only Anvil parser and delivering region/tile patches. |
+| **Entity Radar Stream** | 20-tick periodic broadcast of player coordinates (`0x14 PLAYER_POSITIONS`) with spectator and dimension tracking. |
+| **View Distance Sync** | Negotiates and delivers server view distance (`0x11 SERVER_VIEW_DISTANCE`). |
+| **Server Instance Identity** | Grants `0x13 SERVER_INSTANCE` (capability id 7) to differentiate sub-worlds sharing a seed behind proxies. |
+| **Shared Waypoints** | The separate `confluxmap:waypoints_v1` channel (protocol 1.3): subscription, create, update, delete, broadcast, and atomic persistence. |
+| **Rate Limiting & Hardening** | 3-strikes malformed packet muting and structured error frame (`0x06 ERROR`) response. |
+| **Operator Commands** | `/cfm status`, `/cfm seed`, `/cfm hello`, `/cfm reload`, `/cfm waypoints (list/clear)`. |
 
-The frame order behind the instance identity, the capability negotiation and the waypoint
-message semantics are in [docs/protocol.md](docs/protocol.md). Two points differ from
-upstream: the instance id and the waypoint catalogue are persisted in the plugin's private
-data directory (the WASI sandbox opens only that directory; the world save directory is out
-of reach), and waypoint height validation reuses the client's own coordinate bounds
-(|coord| ≤ 30 000 000, horizontal ≤ 29 999 984) because Pumpkin exposes no per-dimension
-height limits to plugins.
-
-### Not supported: the host is capable, the plugin does not implement it
-
-These are buildable on Pumpkin; they are simply outside the scope of the current form.
+### Not supported or left out by design
 
 | Capability | Notes |
 |---|---|
-| Player position broadcast | The online-player position stream behind the entity radar; needs a per-tick task and player position reads |
-| View distance | `SERVER_VIEW_DISTANCE` |
-| Mid-session policy update | `POLICY_UPDATE`, changing the policy while a session is live |
-| Capability negotiation (corrections) | `MAP_CAPABILITIES` (`0x12`) is used only to grant `SERVER_INSTANCE`; no correction capability is negotiated, and `MAP_COMPATIBILITY` (`0x10`) is never sent |
-| Web map | Upstream serves it over HTTP and WebSocket. Pumpkin lets a plugin listen on TCP (WASI sockets, requiring the `network.tcp.bind` permission) but provides no HTTP server interface, so the protocols would have to be implemented by hand; upstream tiles come from the correction service, which reads the world save, so with corrections unavailable it would only recompute the client's own seed prediction in the browser, which is why it is left undone |
-| Structured errors | The `ERROR` frame |
-| Rate limiting and hardening | Token buckets, malformed-packet strikes and muting, idempotent mutation caching. The waypoint channel implements the whole set; the main channel only shakes hands and needs none of it |
-| Administrative surface | The upstream `enable` / `disable` / `performance` commands |
-
-### Not supported: no viable path on Pumpkin
-
-The full shape of confluxmap is "predict, then correct". The correction half cannot hold on
-Pumpkin:
-
-| Capability | What is missing |
-|---|---|
-| Authoritative map corrections | `MAP_PATCH` / `MAP_REGION_PATCH`. A plugin cannot read the region files of the world save and cannot reach unloaded chunks, so no authoritative map can be produced |
-| Correction invalidation | No chunk-dirty event covers every source of change; the block place and break events only cover player actions |
-| Chunk load state | The plugin API cannot enumerate loaded chunks, and the chunk load and unload events have no dispatch site in the server |
-| Superflat baseline | The world generator preset cannot be read |
-| Automatic seed discovery | The plugin API exposes no seed accessor, and the sandbox opens only the plugin's private directory (see "Configuration file") |
+| **Web Map** | Upstream embeds an HTTP + WebSocket web server. Kept out to maintain a lightweight in-game companion focused on player sync. |
+| **Chunk Load State Overlay** | `0x09 LOAD_STATE_DELTA`. Pumpkin WIT API currently does not expose an iterator for loaded chunks. |
 
 The three restriction flags `biomeMapForbidden`, `structureSearchForbidden` and
 `entityRadarForbidden` are never sent by this plugin, so the client keeps its default
@@ -111,32 +73,31 @@ handshake, and this plugin sends it nothing.
 4. In that file, uncomment the `seed` line and fill in this world's seed; it must match the
    top-level `seed` in `pumpkin.toml`:
 
-   ```toml
-   seed = 81985529216486895
-   ```
-
-   Then run `/cfm reload` to apply it immediately.
-
-   Optional: `tools/inject_seed.py` reads the top-level `seed` from `pumpkin.toml` and writes
-   it into that file, which prevents the two values from drifting apart:
-
-   ```bash
-   python3 tools/inject_seed.py /path/to/pumpkin.toml
-   ```
+4. **Providing the world seed (choose one):**
+   - **Method A (Automatic archive discovery, recommended)**:
+     Symlink the server's world directory into the plugin data directory:
+     ```bash
+     ln -s ../../world plugins/data/confluxmap-pumpkin/world
+     ```
+     On startup or `/cfm reload`, the plugin cascade-reads `world/data/minecraft/world_gen_settings.dat` or `world/level.dat` to discover the seed, worldgen version, and enable authoritative Anvil map corrections.
+   - **Method B (Manual fallback)**:
+     Uncomment `seed` in `config.toml` and fill it in:
+     ```toml
+     seed = 81985529216486895
+     ```
+     Then run `/cfm reload`.
 
 5. Verify: `/cfm seed` should print the seed, the world ID and the worldgen version, and the
-   load log should contain `seed = ...` and `load complete`.
+   load log should contain `auto-detected world archive` or `seed = ...` and `load complete`.
 
 One point deserves attention during installation:
 
-- **Permission confirmation.** Pumpkin defaults to `ask_permission_confirmation = true`, so on
-  its first load the plugin lists the permissions it requests (`fs.read.data`,
-  `fs.write.data`) on the console and waits for confirmation; when the console is not
-  interactive the request is treated as a denial and the plugin does not load. On a server
-  started without a console, either set `[plugins] ask_permission_confirmation = false`, or
-  pre-approve the permissions this plugin requests in `allowed_permissions`. Decisions are
-  recorded per plugin file hash in `plugins/permission_cache.json`, so an updated plugin file
-  is confirmed again.
+- **Permission configuration.** Pumpkin defaults to `ask_permission_confirmation = true`. This plugin requests `fs.read.data` and `fs.write.data`. On non-interactive servers, pre-approve them in `pumpkin.toml`:
+  ```toml
+  [plugins.overrides.confluxmap_pumpkin]
+  enabled = true
+  allowed_permissions = ["fs.read.data", "fs.write.data"]
+  ```
 
 ## Building and testing
 

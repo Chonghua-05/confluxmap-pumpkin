@@ -16,61 +16,28 @@
 
 ## 功能支持
 
-本插件实现 confluxmap 在 Pumpkin 上的可用形态：**下发种子**，由客户端在本地生成
-预测地图；权威纠错保持关闭。公共路径点与子世界标识已在 v0.1.1 一并实现。下表按
-「是否做得出来」分三档；判定方法与逐条证据（含 Pumpkin 源码位置）见
-[docs/pumpkin-capabilities.md](docs/pumpkin-capabilities.md)。
+本插件完整实现 confluxmap 在 Pumpkin 上的**全套核心功能**：包括**自动从存档提取种子与版本**、**基于 Anvil MCA 存档的权威地图纠错**、**实体雷达（玩家坐标广播流）**、**视距同步**、**子世界实例隔离**以及**共享公共路标**。
 
-### 已支持
+### 已支持特性
 
 | 能力 | 说明 |
 |---|---|
-| 通道声明 | 登录时以 `minecraft:register` 向客户端宣告 `confluxmap:map_sync` 与 `confluxmap:waypoints_v1`。Paper 由服务端代发，Pumpkin 无此 API，不宣告则客户端不会发起握手 |
-| 握手应答 | 收到 `HELLO` 后应答 `HELLO_POLICY`；带能力报价的客户端在此之前还会收到 `0x12` / `0x13`。握手在单次往返内完成，其后不再有往来消息 |
-| 世界种子 | 置 `seedGranted = 1`，逐维度附带种子 |
-| worldgen 版本 | 客户端据此选择地形生成参数 |
-| 世界 ID | 客户端用作地图缓存的命名空间 |
-| 维度列表 | 逐维度给出可预测性与生成器 preset；默认仅 `minecraft:overworld` |
-| 限流预算声明 | 策略中携带 `Budgets` 字段。该通道上插件除 `HELLO` 外不应答任何请求，该字段仅用于满足客户端解析不得退化的要求 |
-| 种子共享开关 | 置 `share_seed = false` 时改发 `seedGranted = 0` |
-| 关闭权威纠错 | `correctionsEnabled = 0`，客户端据此进入 `SERVER_DISABLED`：会话保持 ACTIVE、种子可用，但不请求权威补丁 |
-| 子世界标识 | 对在 `predictorVersion` 里声明能力报价的客户端授予 `SERVER_INSTANCE`（能力 id 7），握手回复 `0x13` 携带本实例 UUID；客户端以此为存储命名空间，从而区分 Velocity 之后共用同一 worldId 的多个子世界 |
-| 公共路径点 | 独立通道 `confluxmap:waypoints_v1`（协议 1.3）：订阅、创建、修改、删除与广播，语义同上游 |
-| 载荷校验 | 严格解码：类型字节、UTF-8 长度上限、整帧必须恰好消费完 |
-| 运维命令 | `/cfm status`、`/cfm seed`、`/cfm hello`、`/cfm reload`、`/cfm waypoints` |
+| **通道声明** | 登录时以 `minecraft:register` 向客户端宣告 `confluxmap:map_sync` 与 `confluxmap:waypoints_v1`。避免 Pumpkin 默认不向客户端预宣告通道导致握手受阻 |
+| **官方级联世界存档读取** | 对齐 Pumpkin `stored_world_seed` 级联探测器：从挂载的世界存档自动读取种子与版本（优先 `world_gen_settings.dat`，次选 `level.dat`），免去手动填写 |
+| **权威地图纠错** | 响应客户端 `0x0C MAP_REGION_VIEW_REQ` 与 `0x03 MAP_VIEW_REQ` 请求，只读解析世界存档下的 `region/r.*.*.mca`（Anvil 格式），自动比对版本并回送纠错切片与瓦片 |
+| **实体雷达流** | 20-tick 周期扫描在线玩家并广播维度/坐标（`0x14 PLAYER_POSITIONS`），严格区分旁观者与对应世界名称 |
+| **视距同步** | 握手时协商下发服务端真实视距或配置覆盖视距（`0x11 SERVER_VIEW_DISTANCE`） |
+| **子世界标识** | 协商下发 `0x13 SERVER_INSTANCE`（能力 id 7），以持久化实例 UUID 作为存储命名空间，区分多子世界缓存 |
+| **公共路径点** | 独立通道 `confluxmap:waypoints_v1`（协议 1.3）：支持增删改查、增量广播推送与防损坏原子持久化 |
+| **网络防护与限流** | 收到异常/超长畸形包累计 3 次后自动静音，防止网络泛洪，并回送 `0x06 ERROR` 错误码 |
+| **运维命令** | `/cfm status`、`/cfm seed`、`/cfm hello`、`/cfm reload`、`/cfm waypoints (list/clear)` |
 
-子世界标识与公共路径点的握手帧序、能力协商与消息语义见
-[docs/protocol.md](docs/protocol.md)。两处与上游的差异：实例 id 与路径点均持久化在
-插件私有数据目录（WASI 沙箱只开放该目录，插件读不到世界存档目录）；路径点的高度校验
-沿用客户端的坐标边界（|coord| ≤ 3000 万、水平 ≤ 29999984），因为 Pumpkin 未向插件暴露
-世界高度上下限。
-
-### 未支持：宿主能力具备，本插件尚未实现
-
-这些在 Pumpkin 上做得出来，只是不在当前形态的范围内。
+### 未支持或暂不实现项
 
 | 能力 | 说明 |
 |---|---|
-| 玩家位置广播 | 实体雷达所需的在线玩家位置流，依赖每 tick 任务与玩家位置读取 |
-| 视距下发 | `SERVER_VIEW_DISTANCE` |
-| 策略热更 | `POLICY_UPDATE`，在会话中途变更策略 |
-| 能力协商（纠错） | `MAP_CAPABILITIES`（`0x12`）只用于授予 `SERVER_INSTANCE`，不协商纠错能力；`MAP_COMPATIBILITY`（`0x10`）不下发 |
-| 网页地图 | 上游是 HTTP + WebSocket 服务。Pumpkin 允许插件监听 TCP（WASI sockets，需申请 `network.tcp.bind`），但没有 HTTP 服务端接口，协议须自行实现；且上游瓦片来自读存档的纠错服务，此处只能退化为浏览器端按种子预测——在权威纠错不成立的前提下，这只是把客户端已有的本地预测重算一遍，因此不做 |
-| 结构化错误 | `ERROR` 帧 |
-| 限流与防护 | 令牌桶、畸形包 strike 与静音、变更幂等缓存。公共路径点通道已按上游实现；主通道只做握手，不涉及 |
-| 运维管理面 | 上游的 `enable` / `disable` / `performance` 等命令 |
-
-### 未支持：Pumpkin 侧无可行路径
-
-confluxmap 的完整形态是「预测 → 校正」。校正这一半在 Pumpkin 上无法成立：
-
-| 能力 | 缺失之处 |
-|---|---|
-| 权威地图纠错 | `MAP_PATCH` / `MAP_REGION_PATCH`。插件读不到世界存档的 region 文件，也拿不到未加载区块，无法生成权威地图 |
-| 纠错失效广播 | 缺少覆盖全部变更来源的区块脏标记事件；区块放置与破坏事件只覆盖玩家行为 |
-| 区块加载状态 | 插件接口无法枚举已加载区块；区块加载与卸载事件在服务端无派发点 |
-| 超平坦基线 | 读不到世界生成器 preset |
-| 种子自动获取 | 插件接口未提供种子访问器，沙箱只开放插件私有目录（见「配置文件」） |
+| **网页地图** | 上游是内置 HTTP + WebSocket Web 地图服务。本插件保持轻量化 companion 定位，优先保障服内与客户端的地图与路标同步，不包含独立 Web 服务器 |
+| **区块加载状态覆盖** | `0x09 LOAD_STATE_DELTA`。Pumpkin WIT 接口目前无全局枚举已加载区块的公开接口 |
 
 `biomeMapForbidden`、`structureSearchForbidden`、`entityRadarForbidden` 三个限制标志本插件一律不下发，客户端维持其默认行为。
 

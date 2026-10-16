@@ -139,22 +139,26 @@ companion active (worldId=... worldgen=26.2 seedGranted=true corrections=false
 
 ### 与 Paper 参考实现的 flag 等价性
 
-把官方 `CompanionPolicy.configuredFlags` 按 `enabled=true, shareSeed=true,
-shareCorrections=false` 代入，得到：
+当配置 `share_seed = true, share_corrections = true` 时，本插件置位 `seedGranted` (bit0) 与 `correctionsEnabled` (bit1)，下发的 flags 字节为 `0x03`。客户端据此激活权威地图纠错流程，向服务器发送 `0x0C` 或 `0x03` 请求瓦片纠错。
 
-| 位 | Paper（上述配置） | 本插件 |
+| 位 | 说明 | 本插件取值 |
 |---|---|---|
-| `seedGranted` | 1 | 1 |
-| `correctionsEnabled` | 0 | 0 |
-| `biomeMapForbidden` | 0 | 0 |
-| `chunkLoadStateEnabled` | 0 | 0 |
-| `entityRadarForbidden` | 0 | 0 |
-| `correctionInvalidationEnabled` | 0 | 0 |
-| `chunkRangeCorrectionEnabled` | 0 | 0 |
-| `structureSearchForbidden` | 0 | 0 |
+| `seedGranted` | 授予世界种子 | 1 |
+| `correctionsEnabled` | 开启权威地图纠错 | 1（当 `share_corrections = true` 时） |
+| `biomeMapForbidden` | 禁用生物群系地图 | 0 |
+| `chunkLoadStateEnabled`| 区块加载状态覆盖 | 0 |
+| `entityRadarForbidden` | 禁用实体雷达 | 0 |
+| `correctionInvalidationEnabled` | 纠错失效广播 | 0 |
+| `chunkRangeCorrectionEnabled` | 切片范围纠错 | 0 |
+| `structureSearchForbidden` | 禁用结构搜索 | 0 |
 
-即 flag 字节 `0x01` 与官方 Paper 伙伴"关掉纠错"时**完全一致**。本插件不是自创
-一种形态，而是复刻了参考实现的一个既有配置点。
+## 纠错与雷达相关消息码扩展
+
+1. **`0x11` S2C `SERVER_VIEW_DISTANCE`**：下发 `u16` 大端视距（区块数）。
+2. **`0x14` S2C `PLAYER_POSITIONS`**：实体雷达位置广播，大端 `u16` count + 逐条 [UUID(16B) + name(utf) + dimensionId(utf) + X(f64) + Y(f64) + Z(f64) + flags(u8, bit0=spectator)]。
+3. **`0x0C` C2S `MAP_REGION_VIEW_REQ`** 与 **`0x0D` S2C `MAP_REGION_PATCH`**：裁剪区域切片纠错请求与基于 Anvil MCA 的 Patch 应答。
+4. **`0x03` C2S `MAP_VIEW_REQ`** 与 **`0x04` S2C `MAP_PATCH`**：瓦片纠错请求与 Patch 应答。
+5. **`0x06` S2C `ERROR`**：错误响应帧，`u8` code + `utf` detail。累计 3 次畸形请求触发 3-strikes 静音。
 
 ### 客户端侧的 worldgen 版本白名单
 
