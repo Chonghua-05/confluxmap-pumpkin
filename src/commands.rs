@@ -171,7 +171,21 @@ impl CommandHandler for ReloadHandler {
         };
 
         let loaded = config::load(folder);
-        let next = loaded.config;
+        let mut next = loaded.config;
+
+        if let Ok(world_info) = crate::world::inspect_world(std::path::Path::new(folder)) {
+            let _ = writeln!(
+                out,
+                "auto-detected world archive (seed: {}, version: {:?}) from {:?}",
+                world_info.seed, world_info.version_name, world_info.source
+            );
+            if next.seed.is_none() {
+                next.seed = Some(world_info.seed);
+            }
+            if next.worldgen_override.is_none() && world_info.version_name.is_some() {
+                next.worldgen_override = world_info.version_name;
+            }
+        }
         for note in &loaded.warnings {
             let _ = writeln!(out, "warning: {note}");
         }

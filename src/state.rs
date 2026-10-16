@@ -224,6 +224,80 @@ pub struct Counters {
     pub channels_registered: u64,
 }
 
+static RADAR_SUBSCRIBERS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+static STRIKES: OnceLock<Mutex<std::collections::HashMap<String, u8>>> = OnceLock::new();
+static MUTED: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+
+fn radar_set() -> &'static RwLock<HashSet<String>> {
+    RADAR_SUBSCRIBERS.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+fn strikes_map() -> &'static Mutex<std::collections::HashMap<String, u8>> {
+    STRIKES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn muted_set() -> &'static RwLock<HashSet<String>> {
+    MUTED.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+/// Registers a player as subscribed to the entity radar stream.
+pub fn set_radar_subscriber(name: &str, enabled: bool) {
+    if let Ok(mut set) = radar_set().write() {
+        if enabled {
+            set.insert(name.to_string());
+        } else {
+            set.remove(name);
+        }
+    }
+}
+
+/// Checks whether any players are currently subscribed to the entity radar.
+pub fn has_radar_subscribers() -> bool {
+    radar_set().read().is_ok_and(|s| !s.is_empty())
+}
+
+/// Checks whether a specific player is subscribed to the entity radar.
+pub fn is_radar_subscriber(name: &str) -> bool {
+    radar_set().read().is_ok_and(|s| s.contains(name))
+}
+
+/// Removes a player from all session tracking (on leave/disconnect).
+pub fn clean_player_session(name: &str) {
+    if let Ok(mut set) = radar_set().write() {
+        set.remove(name);
+    }
+    if let Ok(mut strikes) = strikes_map().lock() {
+        strikes.remove(name);
+    }
+    if let Ok(mut muted) = muted_set().write() {
+        muted.remove(name);
+    }
+}
+
+/// Checks if a player has been muted due to too many malformed packets.
+pub fn is_player_muted(name: &str) -> bool {
+    muted_set().read().is_ok_and(|m| m.contains(name))
+}
+
+/// Records a malformed payload strike. Returns `(current_strikes, newly_muted)`.
+pub fn record_malformed_strike(name: &str) -> (u8, bool) {
+    let mut newly_muted = false;
+    let strikes = {
+        let mut map = strikes_map().lock().unwrap();
+        let entry = map.entry(name.to_string()).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    };
+    if strikes >= 3
+        && let Ok(mut muted) = muted_set().write()
+        && !muted.contains(name)
+    {
+        muted.insert(name.to_string());
+        newly_muted = true;
+    }
+    (strikes, newly_muted)
+}
+
 /// Reads every counter at once.
 pub fn counters() -> Counters {
     Counters {

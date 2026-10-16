@@ -19,6 +19,9 @@ crate-type = ["cdylib"]
 # actually pins the resolved build. Keep both in step when the server is bumped.
 pumpkin-plugin-api = "=0.1.0-dev+26.2-26.45"
 tracing = "0.1"
+fastnbt = "2.5"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+thiserror = "2.0"
 
 [profile.release]
 lto = true

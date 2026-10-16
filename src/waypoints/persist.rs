@@ -167,12 +167,8 @@ impl Persistence {
             ));
         }
         let document = to_document(snapshot, self.owner_instance_id.as_deref())?;
-        let temporary = format!("{}.tmp", self.path);
-        fs::write(&temporary, document).map_err(|error| error.to_string())?;
-        fs::rename(&temporary, &self.path).map_err(|error| {
-            let _ = fs::remove_file(&temporary);
-            error.to_string()
-        })
+        crate::storage::atomic_write_str(std::path::Path::new(&self.path), &document)
+            .map_err(|error| error.to_string())
     }
 
     /// Moves a corrupt file aside and starts empty.

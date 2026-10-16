@@ -37,15 +37,28 @@ pub const CHANNEL_ID: &str = "confluxmap:map_sync";
 pub const MSG_HELLO_C2S: u8 = 0x01;
 /// `0x02 S2C HELLO_POLICY` (`Proto.MSG_HELLO_POLICY_S2C`).
 pub const MSG_HELLO_POLICY_S2C: u8 = 0x02;
+/// `0x06 S2C ERROR` (`Proto.MSG_ERROR_S2C`).
+pub const MSG_ERROR_S2C: u8 = 0x06;
+/// `0x11 S2C SERVER_VIEW_DISTANCE` (`Proto.MSG_SERVER_VIEW_DISTANCE_S2C`).
+pub const MSG_SERVER_VIEW_DISTANCE_S2C: u8 = 0x11;
 /// `0x12 S2C MAP_CAPABILITIES` (`Proto.MSG_MAP_CAPABILITIES_S2C`).
 pub const MSG_MAP_CAPABILITIES_S2C: u8 = 0x12;
 /// `0x13 S2C SERVER_INSTANCE` (`Proto.MSG_SERVER_INSTANCE_S2C`).
 pub const MSG_SERVER_INSTANCE_S2C: u8 = 0x13;
+/// `0x14 S2C PLAYER_POSITIONS` (`Proto.MSG_PLAYER_POSITIONS_S2C`).
+pub const MSG_PLAYER_POSITIONS_S2C: u8 = 0x14;
 
 /// Hard cap on any UTF-8 field (`Proto.MAX_UTF8_BYTES`).
 pub const MAX_UTF8_BYTES: usize = 256;
 /// Hard cap on per-dimension entries (`Proto.MAX_DIM_ENTRIES`).
 pub const MAX_DIM_ENTRIES: usize = 8;
+/// Hard cap on player positions entries (`Proto.MAX_PLAYER_POSITION_ENTRIES`).
+pub const MAX_PLAYER_POSITION_ENTRIES: usize = 512;
+
+/// Error codes matching ErrorS2C.
+pub const ERR_MALFORMED_REQUEST: u8 = 1;
+#[allow(dead_code)]
+pub const ERR_COMPANION_DISABLED: u8 = 2;
 
 /// Negotiation envelope version (`MapSyncProtocol.NEGOTIATION_VERSION`).
 pub const NEGOTIATION_VERSION: u8 = 2;
@@ -56,14 +69,17 @@ pub const MAX_CAPABILITIES: usize = 32;
 /// Cap on offered correction profiles (`MapSyncProtocol.MAX_CORRECTION_PROFILES`).
 pub const MAX_CORRECTION_PROFILES: usize = 8;
 
-/// `MapSyncCapability.SERVER_INSTANCE`: the only capability this plugin grants.
-///
-/// The other seven are correction-related, and `PLAYER_POSITIONS` comes with the
-/// radar stream. Granting one this plugin does not implement would leave the
-/// client waiting for messages that never arrive, so they are withheld.
+/// `MapSyncCapability.SERVER_VIEW_DISTANCE`.
+pub const CAP_SERVER_VIEW_DISTANCE: u8 = 6;
+pub const CAP_SERVER_VIEW_DISTANCE_VERSION: u8 = 1;
+
+/// `MapSyncCapability.SERVER_INSTANCE`.
 pub const CAP_SERVER_INSTANCE: u8 = 7;
-/// `MapSyncCapability.SERVER_INSTANCE`'s version (`MapSyncCapability.version()`).
 pub const CAP_SERVER_INSTANCE_VERSION: u8 = 1;
+
+/// `MapSyncCapability.PLAYER_POSITIONS` (radar stream).
+pub const CAP_PLAYER_POSITIONS: u8 = 8;
+pub const CAP_PLAYER_POSITIONS_VERSION: u8 = 1;
 /// `MapCompatibilityS2C.MODE_DISABLED`.
 pub const CORRECTION_MODE_DISABLED: u8 = 2;
 /// `MapCompatibilityS2C.REASON_NO_COMMON_WIRE`.
@@ -231,6 +247,10 @@ pub struct Offer {
     pub caps2: bool,
     /// Whether the offer included `SERVER_INSTANCE` at a usable version.
     pub server_instance: bool,
+    /// Whether the offer included `SERVER_VIEW_DISTANCE` at a usable version.
+    pub server_view_distance: bool,
+    /// Whether the offer included `PLAYER_POSITIONS` at a usable version.
+    pub player_positions: bool,
 }
 
 /// Parses the `predictorVersion` field of a HELLO.
@@ -250,6 +270,8 @@ pub fn parse_offer(field: &str) -> Offer {
             predictor: predictor.to_string(),
             caps2: false,
             server_instance: false,
+            server_view_distance: false,
+            player_positions: false,
         };
     };
     let rest = &field[marker + CAPS_MARKER.len()..];
@@ -264,6 +286,12 @@ pub fn parse_offer(field: &str) -> Offer {
         server_instance: capabilities
             .iter()
             .any(|(id, version)| *id == CAP_SERVER_INSTANCE && *version > 0),
+        server_view_distance: capabilities
+            .iter()
+            .any(|(id, version)| *id == CAP_SERVER_VIEW_DISTANCE && *version > 0),
+        player_positions: capabilities
+            .iter()
+            .any(|(id, version)| *id == CAP_PLAYER_POSITIONS && *version > 0),
     }
 }
 
@@ -428,6 +456,58 @@ pub fn build_hello_policy(
         write_utf(&mut out, &dim.kind);
         out.push(dim.bits());
         out.extend_from_slice(&dim.seed.to_be_bytes());
+    }
+    out
+}
+
+/// Builds an `0x11 S2C SERVER_VIEW_DISTANCE` frame.
+pub fn build_server_view_distance(chunks: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(3);
+    out.push(MSG_SERVER_VIEW_DISTANCE_S2C);
+    out.extend_from_slice(&chunks.to_be_bytes());
+    out
+}
+
+/// Builds an `0x06 S2C ERROR` frame.
+pub fn build_error(code: u8, detail: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(3 + detail.len());
+    out.push(MSG_ERROR_S2C);
+    out.push(code);
+    write_utf(&mut out, detail);
+    out
+}
+
+/// A player's position snapshot for the entity radar stream.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerPositionEntry {
+    /// Player UUID as high/low 64-bit pair.
+    pub id: (u64, u64),
+    /// Display name.
+    pub name: String,
+    /// Dimension resource location (e.g. `minecraft:overworld`).
+    pub dimension_id: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    /// Whether in spectator mode.
+    pub spectator: bool,
+}
+
+/// Builds an `0x14 S2C PLAYER_POSITIONS` frame.
+pub fn build_player_positions(entries: &[PlayerPositionEntry]) -> Vec<u8> {
+    let entries = &entries[..entries.len().min(MAX_PLAYER_POSITION_ENTRIES)];
+    let mut out = Vec::with_capacity(3 + entries.len() * 48);
+    out.push(MSG_PLAYER_POSITIONS_S2C);
+    out.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+    for e in entries {
+        out.extend_from_slice(&e.id.0.to_be_bytes());
+        out.extend_from_slice(&e.id.1.to_be_bytes());
+        write_utf(&mut out, &e.name);
+        write_utf(&mut out, &e.dimension_id);
+        out.extend_from_slice(&e.x.to_be_bytes());
+        out.extend_from_slice(&e.y.to_be_bytes());
+        out.extend_from_slice(&e.z.to_be_bytes());
+        out.push(if e.spectator { 1 } else { 0 });
     }
     out
 }
@@ -682,6 +762,39 @@ mod tests {
         let mut r = wire::Reader::new(&frame[1..]);
         assert_eq!(r.utf(MAX_UTF8_BYTES).as_deref(), Some(GOLDEN_WORLD_ID));
         assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn builds_server_view_distance_frame() {
+        let frame = build_server_view_distance(16);
+        assert_eq!(frame[0], MSG_SERVER_VIEW_DISTANCE_S2C);
+        assert_eq!(&frame[1..3], &16u16.to_be_bytes());
+    }
+
+    #[test]
+    fn builds_error_frame() {
+        let frame = build_error(ERR_MALFORMED_REQUEST, "bad request");
+        assert_eq!(frame[0], MSG_ERROR_S2C);
+        assert_eq!(frame[1], ERR_MALFORMED_REQUEST);
+        let mut r = wire::Reader::new(&frame[2..]);
+        assert_eq!(r.utf(MAX_UTF8_BYTES).as_deref(), Some("bad request"));
+    }
+
+    #[test]
+    fn builds_player_positions_frame() {
+        let entry = PlayerPositionEntry {
+            id: (1, 2),
+            name: "Steve".to_string(),
+            dimension_id: "minecraft:overworld".to_string(),
+            x: 100.5,
+            y: 64.0,
+            z: -200.25,
+            spectator: false,
+        };
+        let frame = build_player_positions(&[entry]);
+        assert_eq!(frame[0], MSG_PLAYER_POSITIONS_S2C);
+        let count = u16::from_be_bytes([frame[1], frame[2]]);
+        assert_eq!(count, 1);
     }
 
     #[test]

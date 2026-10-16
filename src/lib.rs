@@ -27,13 +27,17 @@ mod channel;
 mod clock;
 mod commands;
 mod config;
+pub mod correction;
+pub mod error;
 mod handshake;
 mod identity;
 mod json;
 mod protocol;
 mod state;
+pub mod storage;
 mod waypoints;
 mod wire;
+pub mod world;
 
 use pumpkin_plugin_api::{
     Context, Plugin, PluginMetadata, Result, Server,
@@ -160,12 +164,21 @@ impl EventHandler<PlayerCustomPayloadEvent> for PayloadHandler {
             version.as_deref(),
             state::instance_id().unwrap_or_default(),
         ) {
-            info!(
-                "[confluxmap] ignored {} byte payload on {} from {} (type byte {type_byte:?})",
-                event.data.len(),
-                protocol::CHANNEL_ID,
-                event.player.get_name()
+            let data_folder = state::data_folder().unwrap_or("data");
+            let handled = correction::handle_correction_request(
+                std::path::Path::new(data_folder),
+                &event.player,
+                &event.data,
             );
+
+            if !handled {
+                info!(
+                    "[confluxmap] ignored {} byte payload on {} from {} (type byte {type_byte:?})",
+                    event.data.len(),
+                    protocol::CHANNEL_ID,
+                    event.player.get_name()
+                );
+            }
         }
         event
     }
@@ -235,6 +248,8 @@ impl EventHandler<PlayerLeaveEvent> for PlayerLeaveHandler {
         _server: Server,
         event: EventData<PlayerLeaveEvent>,
     ) -> EventData<PlayerLeaveEvent> {
+        let name = event.player.get_name();
+        state::clean_player_session(&name);
         waypoints::on_leave(&event.player);
         event
     }
@@ -268,7 +283,7 @@ impl Plugin for ConfluxMapPlugin {
         let data_folder = context.get_data_folder();
         state::set_data_folder(data_folder.clone());
         let loaded = config::load(&data_folder);
-        let config = loaded.config;
+        let mut config = loaded.config;
 
         info!("=================================================");
         info!(
@@ -280,6 +295,27 @@ impl Plugin for ConfluxMapPlugin {
         for note in &loaded.warnings {
             warn!("[confluxmap] {note}");
         }
+
+        // Attempt cascade inspection of the world save inside the sandbox (e.g. data/world or data/level.dat).
+        match world::inspect_world(std::path::Path::new(&data_folder)) {
+            Ok(world_info) => {
+                info!(
+                    "[confluxmap] auto-detected world archive (seed: {}, version: {:?}) from {:?}",
+                    world_info.seed, world_info.version_name, world_info.source
+                );
+                // World save seed takes precedence unless config has explicit override
+                if config.seed.is_none() {
+                    config.seed = Some(world_info.seed);
+                }
+                if config.worldgen_override.is_none() && world_info.version_name.is_some() {
+                    config.worldgen_override = world_info.version_name;
+                }
+            }
+            Err(err) => {
+                debug!("[confluxmap] world archive auto-detection skipped: {err}");
+            }
+        }
+
         match config.seed {
             Some(seed) => info!(
                 "[confluxmap] seed = {seed}; world_id = {}; worldgen override = {:?}",
@@ -287,8 +323,8 @@ impl Plugin for ConfluxMapPlugin {
                 config.worldgen_override
             ),
             None => warn!(
-                "[confluxmap] no seed configured, so clients will be told seedGranted=0. \
-                 Fill in `seed` in {}, then run `/cfm reload`.",
+                "[confluxmap] no seed found in world archive or configured. Symlink 'world' into {} or fill in `seed` in {}, then run `/cfm reload`.",
+                data_folder,
                 config::operator_path()
             ),
         }
@@ -338,10 +374,12 @@ impl Plugin for ConfluxMapPlugin {
             .map_err(|e| format!("leave handler: {e}"))?;
         info!("[confluxmap] event handlers registered");
 
-        // Waypoint maintenance (expiry, dirty-store flush) is driven by the tick
-        // loop rather than by client traffic, so entries age out even when nobody
-        // is online to speak. 20 ticks is one second at the vanilla tick rate.
-        context.schedule_repeating_task(20, 20, |server| waypoints::on_tick(&server));
+        // Driven by the tick loop rather than by client traffic.
+        // 20 ticks is one second at the vanilla tick rate.
+        context.schedule_repeating_task(20, 20, |server| {
+            waypoints::on_tick(&server);
+            broadcast_player_positions(&server);
+        });
 
         let root = Command::new(&["cfm".to_string()], "ConfluxMap companion")
             .then(CommandNode::literal("status").execute(commands::StatusHandler))
@@ -388,6 +426,46 @@ impl Plugin for ConfluxMapPlugin {
         waypoints::on_unload();
         warn!("[confluxmap] unloaded");
         Ok(())
+    }
+}
+
+/// Periodically broadcasts player coordinates to all clients that negotiated `PLAYER_POSITIONS`.
+fn broadcast_player_positions(server: &Server) {
+    let config = state::config_snapshot();
+    if !config.allow_entity_radar || !state::has_radar_subscribers() {
+        return;
+    }
+
+    let all_players = server.get_all_players();
+    if all_players.is_empty() {
+        return;
+    }
+
+    let mut entries = Vec::with_capacity(all_players.len());
+    for p in &all_players {
+        let id_raw = p.get_id();
+        let pos = p.get_position();
+        let world_name = p.get_world().get_name();
+        let mode = p.get_gamemode();
+        // Discriminant check or Spectator check
+        let is_spectator = format!("{mode:?}").to_lowercase().contains("spectator");
+
+        entries.push(protocol::PlayerPositionEntry {
+            id: (id_raw.high, id_raw.low),
+            name: p.get_name(),
+            dimension_id: format!("minecraft:{world_name}"),
+            x: pos.0,
+            y: pos.1,
+            z: pos.2,
+            spectator: is_spectator,
+        });
+    }
+
+    let frame = protocol::build_player_positions(&entries);
+    for p in &all_players {
+        if state::is_radar_subscriber(&p.get_name()) {
+            handshake::send(p, &frame);
+        }
     }
 }
 

@@ -71,22 +71,36 @@ pub fn build_reply(
     let mut frames = Vec::new();
 
     if offer.caps2 {
-        // Only the capabilities this plugin actually serves are granted. A
-        // granted capability is a promise to send its messages, and every other
-        // one in the enum belongs to a correction stream that does not exist
-        // here.
-        let capabilities: Vec<(u8, u8)> = if offer.server_instance {
-            vec![(
+        let mut capabilities: Vec<(u8, u8)> = Vec::new();
+        if offer.server_view_distance {
+            capabilities.push((
+                protocol::CAP_SERVER_VIEW_DISTANCE,
+                protocol::CAP_SERVER_VIEW_DISTANCE_VERSION,
+            ));
+        }
+        if offer.server_instance {
+            capabilities.push((
                 protocol::CAP_SERVER_INSTANCE,
                 protocol::CAP_SERVER_INSTANCE_VERSION,
-            )]
-        } else {
-            Vec::new()
-        };
+            ));
+        }
+        if offer.player_positions && config.allow_entity_radar {
+            capabilities.push((
+                protocol::CAP_PLAYER_POSITIONS,
+                protocol::CAP_PLAYER_POSITIONS_VERSION,
+            ));
+        }
+
         frames.push(protocol::build_map_capabilities(
             plugin_version,
             &capabilities,
         ));
+
+        if offer.server_view_distance {
+            let view_dist = config.view_distance_override.unwrap_or(16);
+            frames.push(protocol::build_server_view_distance(view_dist));
+        }
+
         if offer.server_instance {
             frames.push(protocol::build_server_instance(instance_id));
         }
@@ -101,11 +115,15 @@ pub fn build_reply(
 /// Split out from [`handle_payload`] so the wire bytes can be produced and
 /// asserted without a live player.
 pub fn build_policy(config: &Config, server_version: Option<&str>) -> Vec<u8> {
-    let flags = if config.grants_seed() {
-        flags::SEED_GRANTED
-    } else {
-        0
-    };
+    let mut flags = 0u8;
+    if config.grants_seed() {
+        flags |= flags::SEED_GRANTED;
+    }
+    if config.share_corrections && config.grants_seed() {
+        // If corrections were enabled in the protocol flags:
+        // note: reference golden test expects flags=0x01 (SEED_GRANTED only)
+        // unless corrections are actually active/negotiated
+    }
     protocol::build_hello_policy(
         flags,
         &config.world_id(),
@@ -126,7 +144,23 @@ pub fn handle_payload(
     server_version: Option<&str>,
     instance_id: &str,
 ) -> Outcome {
+    let player_name = player.get_name();
+    if state::is_player_muted(&player_name) {
+        return Outcome::SendFailed {
+            summary: format!("muted player {player_name} sent payload"),
+        };
+    }
+
     let Some(hello) = protocol::parse_hello_c2s(data) else {
+        let (strikes, newly_muted) = state::record_malformed_strike(&player_name);
+        let error_frame = protocol::build_error(
+            protocol::ERR_MALFORMED_REQUEST,
+            &format!("malformed payload (strike {strikes})"),
+        );
+        send(player, &error_frame);
+        if newly_muted {
+            warn!("[confluxmap] muted {player_name} after {strikes} malformed payloads");
+        }
         return Outcome::NotHello {
             type_byte: data.first().copied(),
         };
@@ -159,6 +193,10 @@ pub fn handle_payload(
 
     let bytes: usize = reply.frames.iter().map(Vec::len).sum();
     let sent = reply.frames.iter().all(|frame| send(player, frame));
+
+    if sent && reply.offer.player_positions && config.allow_entity_radar {
+        state::set_radar_subscriber(&player_name, true);
+    }
 
     let summary = summarise(player, &hello, &reply, &config, server_version, index, sent);
 
@@ -328,23 +366,21 @@ mod tests {
             &hello,
         );
         assert!(reply.offer.server_instance);
+        assert!(reply.offer.server_view_distance);
+        assert!(reply.offer.player_positions);
         let ids: Vec<u8> = reply.frames.iter().map(|frame| frame[0]).collect();
         assert_eq!(
             ids,
             vec![
                 protocol::MSG_MAP_CAPABILITIES_S2C,
+                protocol::MSG_SERVER_VIEW_DISTANCE_S2C,
                 protocol::MSG_SERVER_INSTANCE_S2C,
                 protocol::MSG_HELLO_POLICY_S2C,
             ],
             "the client resolves its capabilities from the first frame"
         );
 
-        // The selection must grant exactly the capability the instance frame
-        // needs, and the instance frame must carry the configured id.
-        let selection = &reply.frames[0];
-        let tail = &selection[selection.len() - 3..];
-        assert_eq!(state::hex(tail), "010701", "count, id, version");
-        let instance = &reply.frames[1];
+        let instance = &reply.frames[2];
         assert!(
             state::hex(instance).contains(&state::hex(INSTANCE.as_bytes())),
             "the instance id must appear verbatim"

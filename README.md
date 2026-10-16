@@ -98,25 +98,31 @@ confluxmap 的完整形态是「预测 → 校正」。校正这一半在 Pumpki
    plugins/data/confluxmap-pumpkin/config.toml
    ```
 
-4. 在该文件中取消 `seed` 一行的注释并填入本世界的种子，取值须与 `pumpkin.toml` 顶层的 `seed` 一致：
+4. **世界种子提供方式（二选一）：**
+   - **方式 A（自动从存档读取，推荐）**：
+     将服务端的世界存档目录软链接或挂载到插件数据目录的 `world` 下：
+     ```bash
+     ln -s ../../world plugins/data/confluxmap-pumpkin/world
+     ```
+     插件启动或重载时会自动级联读取 `world/data/minecraft/world_gen_settings.dat` 或 `world/level.dat`，自动提取真实种子和生成版本。
+   - **方式 B（手动配置兜底）**：
+     在 `config.toml` 中取消 `seed` 一行的注释并填入本世界的种子：
+     ```toml
+     seed = 81985529216486895
+     ```
+     随后执行 `/cfm reload` 即时生效。
 
-   ```toml
-   seed = 81985529216486895
-   ```
-
-   随后执行 `/cfm reload` 即时生效。
-
-   [可选]`tools/inject_seed.py` 会读取 `pumpkin.toml` 顶层的 `seed` 写入该文件，可避免两处取值不一致：
-
-   ```bash
-   python3 tools/inject_seed.py /path/to/pumpkin.toml
-   ```
-
-5. 核对：`/cfm seed` 应显示种子、世界 ID 与 worldgen 版本；加载日志中应出现 `seed = ...` 与 `load complete`。
+5. 核对：`/cfm seed` 应显示种子、世界 ID 与 worldgen 版本；加载日志中应出现 `auto-detected world archive` 或 `seed = ...` 与 `load complete`。
 
 安装时需注意：
 
-- **权限确认。** Pumpkin 默认 `ask_permission_confirmation = true`，插件首次加载会在控制台列出其申请的权限（`fs.read.data`、`fs.write.data`）并等待确认；控制台不可交互时按拒绝处理，插件不会加载。以无控制台方式启动的服务端，请设置 `[plugins] ask_permission_confirmation = false`，或将该插件申请的权限列入 `allowed_permissions` 预先批准。已作出的决定按插件文件哈希记录于 `plugins/permission_cache.json`，插件文件更新后需重新确认。
+- **权限确认与配置。** Pumpkin 默认 `ask_permission_confirmation = true`，插件加载需要 `fs.read.data` 与 `fs.write.data` 权限。建议在服务端的 `pumpkin.toml` 中预先批准，避免非交互式控制台下被拒绝：
+  ```toml
+  # 在 pumpkin.toml 中为本插件预先配置权限：
+  [plugins.overrides.confluxmap_pumpkin]
+  enabled = true
+  allowed_permissions = ["fs.read.data", "fs.write.data"]
+  ```
 
 ## 构建与测试
 

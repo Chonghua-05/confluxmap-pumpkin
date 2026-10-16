@@ -57,6 +57,10 @@ pub const TEMPLATE: &str = "\
 # render no map. Default: true.
 # share_seed = true
 
+# Whether to enable server-side authoritative map corrections from Anvil saves.
+# Default: true.
+# share_corrections = true
+
 # The worldgen version sent to clients, e.g. \"1.21.4\". Leave unset to use the
 # Minecraft version of the running server.
 # worldgen = \"\"
@@ -88,6 +92,13 @@ pub const TEMPLATE: &str = "\
 # Waypoint changes one player may make per minute; excess is throttled. Values
 # outside 1-6000 are clamped. Default: 30.
 # waypoint_mutations_per_minute = 30
+
+# Whether to stream player positions to clients for the entity radar. Default: true.
+# allow_entity_radar = true
+
+# Optional view distance override in chunks advertised to clients (e.g. 16).
+# Default: unset (queried from server).
+# view_distance = 16
 ";
 
 /// Minecraft version baked into the `pumpkin-plugin-api` build this plugin was
@@ -120,6 +131,8 @@ pub struct Config {
     pub seed: Option<i64>,
     /// Whether the seed may be granted to clients at all (`share_seed`).
     pub share_seed: bool,
+    /// Whether server-side authoritative map corrections are enabled (`share_corrections`).
+    pub share_corrections: bool,
     /// Explicit `worldgen`, when set.
     pub worldgen_override: Option<String>,
     /// Explicit `world_id`, when set.
@@ -138,6 +151,10 @@ pub struct Config {
     pub max_waypoints_per_player: u32,
     /// Waypoint mutations a single player may make per minute.
     pub waypoint_mutations_per_minute: u32,
+    /// Whether to stream player positions for the entity radar.
+    pub allow_entity_radar: bool,
+    /// Optional view distance override in chunks.
+    pub view_distance_override: Option<u16>,
 }
 
 impl Default for Config {
@@ -145,6 +162,7 @@ impl Default for Config {
         Config {
             seed: None,
             share_seed: true,
+            share_corrections: true,
             worldgen_override: None,
             world_id_override: None,
             dims: default_dims(),
@@ -154,6 +172,8 @@ impl Default for Config {
             max_waypoints_per_world: 512,
             max_waypoints_per_player: 64,
             waypoint_mutations_per_minute: 30,
+            allow_entity_radar: true,
+            view_distance_override: None,
         }
     }
 }
@@ -294,6 +314,7 @@ impl Config {
                 .map_or_else(|| "<unset>".to_string(), |s| s.to_string())
         );
         let _ = writeln!(out, "share_seed     = {}", self.share_seed);
+        let _ = writeln!(out, "share_corrections = {}", self.share_corrections);
         let _ = writeln!(out, "grants_seed    = {}", self.grants_seed());
         let _ = writeln!(out, "world_id       = {}", self.world_id());
         let _ = writeln!(
@@ -333,6 +354,13 @@ impl Config {
             out,
             "waypoint_mutations_per_minute = {}",
             self.waypoint_mutations_per_minute
+        );
+        let _ = writeln!(out, "allow_entity_radar = {}", self.allow_entity_radar);
+        let _ = writeln!(
+            out,
+            "view_distance  = {}",
+            self.view_distance_override
+                .map_or_else(|| "<server default>".to_string(), |v| v.to_string())
         );
         out
     }
@@ -398,6 +426,13 @@ fn parse(source: &str, warnings: &mut Vec<String>) -> Config {
                     config.share_seed
                 )),
             },
+            "share_corrections" => match parse_bool(&value) {
+                Some(share) => config.share_corrections = share,
+                None => warnings.push(format!(
+                    "line {number}: `share_corrections = {value}` is not a boolean; keeping {}",
+                    config.share_corrections
+                )),
+            },
             "worldgen" => config.worldgen_override = non_empty(value),
             "world_id" => config.world_id_override = non_empty(value),
             "dims" => config.dims = parse_dims(&value),
@@ -434,6 +469,21 @@ fn parse(source: &str, warnings: &mut Vec<String>) -> Config {
                 None => warnings.push(format!(
                     "line {number}: `waypoint_mutations_per_minute = {value}` is not a positive integer; keeping {}",
                     config.waypoint_mutations_per_minute
+                )),
+            },
+            "allow_entity_radar" => match parse_bool(&value) {
+                Some(allowed) => config.allow_entity_radar = allowed,
+                None => warnings.push(format!(
+                    "line {number}: `allow_entity_radar = {value}` is not a boolean; keeping {}",
+                    config.allow_entity_radar
+                )),
+            },
+            "view_distance" => match parse_u32(&value) {
+                Some(chunks) if (2..=64).contains(&chunks) => {
+                    config.view_distance_override = Some(chunks as u16);
+                }
+                _ => warnings.push(format!(
+                    "line {number}: `view_distance = {value}` is outside 2-64; keeping default"
                 )),
             },
             _ => unknown.push(key),
